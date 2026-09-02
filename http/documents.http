@@ -1,0 +1,77 @@
+### Health
+GET {{host}}/actuator/health
+
+### 1. Create metadata -> returns an upload URL
+POST {{host}}/documents
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+  "filename": "proposal.txt",
+  "contentType": "text/plain"
+}
+
+> {%
+    client.test("created", function () {
+        client.assert(response.status === 201, "expected 201, got " + response.status);
+        client.assert(response.body.document.status === "PENDING_UPLOAD");
+    });
+    client.global.set("documentId", response.body.document.id);
+    client.global.set("uploadUrl", response.body.uploadUrl);
+%}
+
+### 2. Upload the bytes to the upload URL
+PUT {{uploadUrl}}
+Content-Type: text/plain
+X-User-Id: {{user}}
+
+< ./sample.txt
+
+> {%
+    client.test("uploaded", function () {
+        client.assert(response.status === 200);
+        client.assert(response.body.status === "UPLOADED");
+        client.assert(response.body.fileSize > 0);
+    });
+%}
+
+### 3. Read metadata -> now includes a download URL
+GET {{host}}/documents/{{documentId}}
+X-User-Id: {{user}}
+
+> {%
+    client.test("has download url", function () {
+        client.assert(response.body.downloadUrl != null);
+    });
+    client.global.set("downloadUrl", response.body.downloadUrl);
+%}
+
+### 4. Download the bytes
+GET {{downloadUrl}}
+X-User-Id: {{user}}
+
+### 5. List my documents
+GET {{host}}/documents
+X-User-Id: {{user}}
+
+### 6. Another user cannot see it (404, not 403 - we don't confirm the id exists)
+GET {{host}}/documents/{{documentId}}
+X-User-Id: someone-else
+
+### 7. Delete metadata and bytes
+DELETE {{host}}/documents/{{documentId}}
+X-User-Id: {{user}}
+
+### 8. Gone
+GET {{host}}/documents/{{documentId}}
+X-User-Id: {{user}}
+
+### Validation failure example
+POST {{host}}/documents
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+  "filename": "",
+  "contentType": "not a media type"
+}
