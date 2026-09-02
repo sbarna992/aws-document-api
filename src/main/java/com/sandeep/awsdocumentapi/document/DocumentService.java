@@ -1,9 +1,11 @@
 package com.sandeep.awsdocumentapi.document;
 
+import com.sandeep.awsdocumentapi.processing.DocumentProcessingRequested;
 import com.sandeep.awsdocumentapi.storage.DocumentStorage;
 import com.sandeep.awsdocumentapi.storage.StorageKeys;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,6 +21,7 @@ public class DocumentService {
 
     private final DocumentRepository repository;
     private final DocumentStorage storage;
+    private final ApplicationEventPublisher events;
 
     /** A document's bytes together with the metadata needed to serve them. */
     public record DocumentContent(Document document, Resource resource) {
@@ -68,6 +71,25 @@ public class DocumentService {
             throw new InvalidDocumentStateException(id, document.getStatus(), "be downloaded");
         }
         return new DocumentContent(document, storage.load(document.getStorageKey()));
+    }
+
+    /**
+     * Flips the document to PROCESSING and announces it. The event is delivered only after this
+     * transaction commits (see DocumentProcessor), so the worker can never observe the old state.
+     */
+    @Transactional
+    public Document requestProcessing(String ownerId, UUID id) {
+        Document document = get(ownerId, id);
+        DocumentStatus status = document.getStatus();
+        if (status == DocumentStatus.PENDING_UPLOAD || status == DocumentStatus.PROCESSING) {
+            throw new InvalidDocumentStateException(id, status, "be processed");
+        }
+
+        document.markProcessing();
+        Document saved = repository.save(document);
+        events.publishEvent(new DocumentProcessingRequested(id));
+        log.info("Processing requested for document {}", id);
+        return saved;
     }
 
     /**

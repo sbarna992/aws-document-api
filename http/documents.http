@@ -50,6 +50,28 @@ X-User-Id: {{user}}
 GET {{downloadUrl}}
 X-User-Id: {{user}}
 
+### 4b. Trigger asynchronous processing (202)
+POST {{host}}/documents/{{documentId}}/process
+X-User-Id: {{user}}
+
+> {%
+    client.test("accepted", function () {
+        client.assert(response.status === 202);
+        client.assert(response.body.status === "PROCESSING");
+    });
+%}
+
+### 4c. Poll: should now be PROCESSED with a checksum
+GET {{host}}/documents/{{documentId}}
+X-User-Id: {{user}}
+
+> {%
+    client.test("processed", function () {
+        client.assert(response.body.document.status === "PROCESSED");
+        client.assert(response.body.document.checksumSha256.length === 64);
+    });
+%}
+
 ### 5. List my documents
 GET {{host}}/documents
 X-User-Id: {{user}}

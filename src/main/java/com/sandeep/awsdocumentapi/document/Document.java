@@ -12,7 +12,6 @@ import jakarta.persistence.Transient;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
-import lombok.Setter;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 import org.springframework.data.domain.Persistable;
@@ -46,8 +45,13 @@ public class Document implements Persistable<UUID> {
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    @Setter
     private DocumentStatus status;
+
+    @Column(name = "checksum_sha256")
+    private String checksumSha256;
+
+    @Column(name = "failure_reason")
+    private String failureReason;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
@@ -75,6 +79,25 @@ public class Document implements Persistable<UUID> {
     public void markUploaded(long fileSize) {
         this.fileSize = fileSize;
         this.status = DocumentStatus.UPLOADED;
+        this.checksumSha256 = null;
+        this.failureReason = null;
+    }
+
+    public void markProcessing() {
+        this.status = DocumentStatus.PROCESSING;
+        this.checksumSha256 = null;
+        this.failureReason = null;
+    }
+
+    public void markProcessed(String checksumSha256) {
+        this.status = DocumentStatus.PROCESSED;
+        this.checksumSha256 = checksumSha256;
+        this.failureReason = null;
+    }
+
+    public void markFailed(String reason) {
+        this.status = DocumentStatus.FAILED;
+        this.failureReason = reason;
     }
 
     @Override

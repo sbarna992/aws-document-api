@@ -10,6 +10,8 @@ public record DocumentResponse(
         String contentType,
         Long fileSize,
         DocumentStatus status,
+        String checksumSha256,
+        String failureReason,
         Instant createdAt,
         Instant updatedAt) {
 
@@ -20,6 +22,8 @@ public record DocumentResponse(
                 document.getContentType(),
                 document.getFileSize(),
                 document.getStatus(),
+                document.getChecksumSha256(),
+                document.getFailureReason(),
                 document.getCreatedAt(),
                 document.getUpdatedAt());
     }

@@ -87,6 +87,13 @@ public class DocumentController {
         return response.body(content.resource());
     }
 
+    /** Accepted, not done: processing runs asynchronously. Poll GET /documents/{id} for the outcome. */
+    @PostMapping("/{id}/process")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public DocumentResponse process(@RequestHeader(OWNER_HEADER) String ownerId, @PathVariable UUID id) {
+        return DocumentResponse.from(service.requestProcessing(ownerId, id));
+    }
+
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@RequestHeader(OWNER_HEADER) String ownerId, @PathVariable UUID id) {
