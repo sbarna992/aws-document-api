@@ -49,7 +49,7 @@ Prerequisites: JDK 25+ and PostgreSQL 17+ on `localhost:5432`.
 
 1. Create the role and database once:
    ```sql
-   CREATE ROLE docapi WITH LOGIN PASSWORD 'docapi';
+   CREATE ROLE docapi WITH LOGIN PASSWORD '<choose-a-password>';
    CREATE DATABASE documentdb OWNER docapi;
    ```
 2. Start the API (the `local` profile is the default):
@@ -59,8 +59,10 @@ Prerequisites: JDK 25+ and PostgreSQL 17+ on `localhost:5432`.
    Flyway creates the schema on first start; document bytes land in `./local-storage/documents/`.
 3. Check http://localhost:8080/actuator/health.
 
-Configuration lives in `src/main/resources/application-local.properties`. Override the database
-password with the `DOCAPI_DB_PASSWORD` environment variable.
+Configuration lives in `src/main/resources/application-local.properties`. The database password is
+**not** in the file: set the `DOCAPI_DB_PASSWORD` environment variable (a user-level variable via
+`setx DOCAPI_DB_PASSWORD <value>` is simplest on Windows; restart IntelliJ afterwards). A missing or wrong
+value makes the application fail at startup by design.
 
 ### Trying it out
 
