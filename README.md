@@ -102,3 +102,30 @@ docs/         architecture decisions
 | Async processing | in-process `@Async` listener | SQS queue + Lambda worker, DLQ |
 | Identity | `X-User-Id` header | API Gateway / Cognito |
 | Health | `/actuator/health` | ALB target group health check |
+
+## AWS account (Phase 1)
+
+| Item | Value |
+|---|---|
+| Region | `us-east-1` — everything lives here; ACM certificates for CloudFront must be here anyway |
+| Account plan | **Pay-as-you-go, no credits, no free tier.** Verified 2026-09-14: Credits $0.00 / 0 active; not on the credits-based plan model; the account dates from **~December 2012** (a dormant root access key was 5015 days old), so the classic 12-month free tier expired in 2013. **Every resource bills at list price from the first hour.** Free regardless: IAM, Identity Center, STS, Organizations, Budgets, S3 gateway endpoint. Sizing follows from this — RDS `db.t4g.micro` (not `small`), EC2 `t4g.small` for JVM headroom, ALB and interface endpoints deleted whenever idle. Budget alerts and same-day teardown are the only guardrails. |
+| Daily access | IAM Identity Center user with the `AdministratorAccess` permission set; root is MFA-protected and used only for root-only tasks |
+| Root recovery | AWS issues **no recovery codes** for root MFA. Redundancy is a **second registered MFA device** (root supports up to 8). If every device is lost, the only path back is AWS's "Troubleshoot MFA" flow, which verifies by email to the root address **and** a phone call to the registered number — both must stay current under Account → Contact Information. |
+| CLI profile | `document-api` (`aws configure sso`); `AWS_PROFILE=document-api`, `AWS_DEFAULT_REGION=us-east-1` |
+| Budgets | $10 and $25 per month, actual + forecasted alerts; Cost Anomaly Detection daily summary |
+| Audit | CloudTrail `docapi-lab-trail` (multi-Region); AWS Config recorder with a small rule set |
+| Cleanup ledger | [`docs/cleanup.md`](docs/cleanup.md) — one row per resource, teardown **2026-10-22** |
+
+### Tags — every resource carries these
+
+```
+Project     = document-api-lab
+Environment = dev
+Owner       = sandeep
+ManagedBy   = console | cli | cdk
+Stage       = 01-account | 02-s3 | 03-rds | 04-ec2 | 05-identity | 06-observability | 07-network | 08-resilience | 09-async | 10-serverless | 11-data | 12-iac
+DeleteAfter = 2026-10-22
+```
+
+`Project` and `Stage` are activated as cost allocation tags so Cost Explorer can group spend by phase.
+Tag keys are case-sensitive. Untagged = missed on teardown day.

@@ -181,3 +181,40 @@ the as-built API is ready to move and records what each later phase will change.
 backups (Phase 3), Lambda takes OS and runtime (Phase 10), EC2 leaves the OS with us (Phase 4).
 This project is a **replatform** (lift-and-optimise) with a refactored slice (Phases 9–10), not a
 rehost and not a full refactor.
+
+## 12. Multi-account design on paper; one account in practice (Phase 1, P1.S1.4)
+
+**Context.** Enabling IAM Identity Center creates a one-account AWS Organization with this account as
+the management account. The exam (Task 1.1) expects a multi-account strategy; a solo lab with strict
+cost discipline does not benefit from extra accounts.
+
+**Decision.** No additional accounts, OUs, or SCPs are created. The design that *would* be used for a
+company is recorded here so the vocabulary is exercised:
+
+```
+Root
+├── Security OU        log-archive account (CloudTrail org trail, Config aggregator), audit account
+├── Sandbox OU         one account per engineer; SCP: deny everything outside us-east-1 except global services
+├── Dev OU             document-api-dev
+└── Prod OU            document-api-prod; SCP: deny CloudTrail StopLogging/DeleteTrail/UpdateTrail,
+                       deny LeaveOrganization, deny disabling GuardDuty/Config
+```
+
+Example guardrail SCP (never attached in this lab; attach to an OU, never to the organization root):
+
+```json
+{ "Version": "2012-10-17", "Statement": [ { "Sid": "ProtectAuditTrail", "Effect": "Deny",
+  "Action": ["cloudtrail:StopLogging", "cloudtrail:DeleteTrail", "cloudtrail:UpdateTrail"],
+  "Resource": "*" } ] }
+```
+
+**The two sentences that matter.** *IAM policies grant permissions; SCPs only set the maximum
+permissions available (a guardrail) and grant nothing.* *An SCP attached to the root, an OU, or an
+account applies to every principal in it — including the member account's root user — but never to
+the management account.* Evaluation: allowed only if the SCP allows **and** the identity policy allows
+(**and** any resource policy / permission boundary allows); an explicit deny anywhere wins.
+Resource control policies (RCPs, 2024) do the same for resources ("no bucket in this organisation may
+be read from outside it"). Control Tower is the answer to "set up a multi-account landing zone with
+best-practice guardrails quickly"; it builds on Organizations.
+
+**Consequences.** Zero cost, zero teardown. Revisited in Phase 15's Task 1.1 close-out.
