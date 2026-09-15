@@ -1,0 +1,248 @@
+# Phases & Steps Completed — Running Breakdown
+
+*Running log of what has been accomplished, phase by phase, task by task. Updated at the end of each
+working day. Step IDs (`P1.S1.2` etc.) and exam-topic mappings follow
+`SAA-C03_Replatforming_Roadmap_Final_Document.md`. "Who" = **Sandeep** (console / manual work) or
+**Claude** (code, CLI, documentation).*
+
+*Last updated: 2026-09-15. Exam: 2026-10-31. Hands-on ends: 2026-10-18.*
+
+| Phase | Status | Dates | Commits |
+|---|---|---|---|
+| Local build (legacy Stages 1–2) | ✅ Done | 2026-09-02 | `4516aaa` … `02ff2c2` (7 commits) |
+| Phase 0 — Readiness check | ✅ Done | 2026-09-14 | `a30018a`, tag `v0-local-baseline` |
+| Phase 1 — AWS account foundation | ✅ Done (2 items deferred ~24h) | 2026-09-14 → 15 | `ea7ab1b`, `389d384` |
+| Phase 2 — Files to Amazon S3 | ⏳ Next | planned Sep 17–20 | — |
+
+---
+
+## Local build — the Document API on the laptop (2026-09-02)
+
+**What the phase is.** Build the smallest realistic Spring Boot REST service that has storage,
+metadata, an authorisation boundary and an asynchronous step — so that every later AWS phase replaces
+one concern of a *working* system rather than designing in the abstract. Everything runs on one
+laptop: PostgreSQL for metadata, a local directory for bytes.
+
+```
+Client ──HTTP──▶ Spring Boot document-api ──JDBC──▶ PostgreSQL 18.6   (metadata)
+                          └──────────────────────▶ ./local-storage/  (bytes)
+```
+
+### Tasks
+
+**1. Project skeleton, profiles, health endpoint** — *Claude* · `4516aaa`
+Exam topic: groundwork for D2 Task 2.2 (health checks) and D1 Task 1.2 (externalised configuration).
+- Added `spring-boot-starter-validation` (missing from the Initializr pom) and `spring-boot-starter-actuator`.
+- `application.properties` + `application-local.properties`: profile-based config, `ddl-auto=validate`, `/actuator/health` exposed — the endpoint an ALB target group will later poll.
+- `git init`, `.gitignore` for `local-storage/`.
+
+**2. Schema, entity, repository** — *Claude* · `f6f2741`
+Exam topic: D3 Task 3.3 (relational data modelling; same migrations later run on RDS).
+- Flyway `V1__create_documents.sql`: `documents` table with `owner_id`, nullable `file_size`, unique `storage_key`, `status`, timestamps, index on `(owner_id, created_at DESC)`.
+- `Document` JPA entity with app-assigned UUID and `Persistable` (avoids a SELECT before every INSERT); `DocumentStatus` enum; owner-scoped repository methods.
+- Sandeep connected IntelliJ's Database tool to `documentdb`.
+
+**3. Storage abstraction** — *Claude* · `4812f03`
+Exam topic: D3 Task 3.1 / D2 Task 2.1 — object storage vs local disk; the seam that makes the S3 swap a one-class change.
+```java
+public interface DocumentStorage {
+    long store(String storageKey, InputStream content);
+    Resource load(String storageKey);
+    void delete(String storageKey);      // idempotent
+    boolean exists(String storageKey);
+}
+```
+- `LocalFileSystemStorage`: writes to a `.part` file then atomic rename; rejects keys that escape the root (`../`).
+- `StorageKeys`: `<uuid>-<sanitised-filename>` — the same key format works as a file path and as an S3 object key.
+
+**4. REST endpoints, two-phase upload, service layer** — *Claude* · `8efce92`
+Exam topic: D1 Task 1.2 (presigned-URL pattern, modelled locally) · D2 Task 2.1 (stateless design).
+- `POST /documents` returns an **upload URL**; `PUT /documents/{id}/content` receives bytes; `GET /documents/{id}` returns a **download URL** once bytes exist. Locally both URLs point back at the API; on AWS they become presigned S3 URLs and the client contract does not change.
+- Owner from an `X-User-Id` header; another owner's document → `404`, never `403`.
+- IntelliJ HTTP-client file `http/documents.http` with environment `local`.
+
+```
+ Client                 API                    Storage
+   │ POST /documents     │                        │
+   │────────────────────▶│ row: PENDING_UPLOAD    │
+   │ 201 + uploadUrl     │                        │
+   │◀────────────────────│                        │
+   │ PUT <uploadUrl>     │──── store(bytes) ─────▶│
+   │ 200 UPLOADED        │                        │
+```
+
+**5. RFC 9457 problem details** — *Claude* · `e249ec6`
+Exam topic: D1 Task 1.2 (never leak internals) — and the answer to the very first question of the project, "how do I log an error?": log once, at the boundary.
+- `ApiExceptionHandler extends ResponseEntityExceptionHandler`: `404`/`409` for domain exceptions, field errors on `400`, generic `500` with the stack trace only in the log. `server.error.include-*=never`.
+
+**6. Asynchronous processing** — *Claude* · `97809bb`
+Exam topic: D2 Task 2.1 (event-driven decoupling; the local stand-in for SQS + a worker).
+- Flyway `V2__add_processing_columns.sql` (`checksum_sha256`, `failure_reason`).
+- `POST /documents/{id}/process` → `202`; `@Async @TransactionalEventListener` worker runs **only after commit**, computes SHA-256, writes `PROCESSED` / `FAILED`.
+- Three bugs found and fixed on the way: `CHAR(64)` vs Hibernate `VARCHAR` (schema validation caught it); an empty checksum caused by Spring's `FormContentFilter` eating a PUT body sent as `x-www-form-urlencoded` (filter disabled); a unit test that only used an in-memory resource (now hashes a real file).
+
+**7. End-to-end test, README, decision log** — *Claude* · `02ff2c2`
+Exam topic: none directly; the regression harness every later phase's VERIFY step relies on.
+- `DocumentApiEndToEndTest` (`@SpringBootTest`, random port, `RestTestClient`): create → 409s → upload to the returned URL → download → process → await `PROCESSED` → list → cross-owner 404 → delete → empty directory. 30 tests total.
+- `README.md`, `docs/decisions.md` (10 ADRs), `C:\AWS\Document_API_Replatforming_High_Level.md` briefing document.
+
+---
+
+## Phase 0 — Readiness check (2026-09-14)
+
+**What the phase is.** Verify, with evidence, that the as-built API is ready to move: pinned runtime,
+externalised secret-free configuration, statelessness, a health/error contract, and a rerunnable
+regression baseline. Nothing is built; one ADR and one git tag come out of it.
+
+### Tasks
+
+**P0.S1 — Inventory dependencies, freeze the runtime contract** — *Claude*
+Exam topic: D3 Task 3.2 · `EX-3.2-K01/K05` — which compute fits a runtime constraint (Lambda = managed runtimes only; EC2 = anything).
+- `./mvnw dependency:tree` + `help:effective-pom` → compile `--release 25`, run JDK 26.0.2.1, no preview features. Boot 4.1.1 · Hibernate 7.4.5 · Jackson 3.1.5 (`tools.jackson.*`) · HikariCP 7.0.2 · Flyway 12.4.0.
+- DevTools confirmed `runtime`+`optional` → not in the deployable JAR.
+
+**P0.S2 — Configuration externalised, no secrets** — *Claude*
+Exam topic: D1 Task 1.2 · `EX-1.2-K01` credentials security · `EX-1.2-S03` Secrets Manager vs Parameter Store.
+- **Finding:** `spring.datasource.password=${DOCAPI_DB_PASSWORD:docapi}` — a committed default.
+- Fix: default removed; local Postgres role password rotated (`ALTER ROLE`); value stored only as a user-level Windows env var (`setx`); README updated.
+- Proof: the packaged JAR started with a wrong password exits 1 with `password authentication failed`.
+- Created `application-aws.properties` stub (health only, `show-details=never`, datasource from env).
+
+**P0.S3 — Statelessness check** — *Claude*
+Exam topic: D2 Task 2.1 · `EX-2.1-K04/K06` stateless vs stateful, horizontal vs vertical scaling.
+- Grep for `HttpSession`, static maps, caches → none. Identity is per request; ids are app-assigned UUIDs.
+- **The one stateful thing:** bytes in `./local-storage/documents` (Phase 2 removes it). In-flight-job gap (crash mid-processing leaves `PROCESSING`) recorded for Phase 9.
+
+**P0.S4 — Health and error contracts** — *Claude*
+Exam topic: D2 Task 2.2 · `EX-2.2-K08` load-balancer health checks · `EX-2.2-S04` single points of failure.
+- `/actuator/health` → `200` with a `db` component; only `health`,`info` exposed. `DOWN→503` is the Boot default (not demonstrated — stopping the Windows service needs elevation).
+
+**P0.S5 — Baseline, tag, readiness ADR** — *Claude* (tag push, GitHub repo creation: *Sandeep*)
+Exam topic: `EX-1.1-K05` shared responsibility model (starting point: today everything is ours).
+- `./mvnw clean verify` → 30 green; tag `v0-local-baseline`; repo `github.com/sbarna992/aws-document-api`.
+- **ADR 11** in `docs/decisions.md`: findings table, the dossier-assumptions table (✓/✗), and "what each phase changes".
+- Sandeep ran `http/documents.http` top to bottom after restarting IntelliJ — all requests passed.
+
+**P0.S6 — Container / mock notes** — *Claude*
+Exam topic: D2 Task 2.1 · `EX-2.1-K08/K14` containers, ECS vs EKS vs Fargate (conceptual; hands-on is post-exam).
+- Notes in ADR 11: how the JAR would be containerised; why LocalStack/Testcontainers are unavailable (no Docker) and how Phase 2 tests S3 instead.
+
+---
+
+## Phase 1 — AWS account foundation (2026-09-14 → 15)
+
+**What the phase is.** Make the account safe to experiment in and unable to surprise on a bill:
+protected root, daily admin through IAM Identity Center, budget alarms, an audit trail, a configuration
+recorder, one Region, a tagging convention, a working CLI, a cleanup ledger.
+
+```
+ root ── MFA ×2, no keys ── root-only tasks
+   │
+   ▼
+ IAM Identity Center ── AdministratorAccess (4 h sessions, MFA)
+   │  STS temporary credentials
+   ▼
+ ┌── AWS account 234178676885 (us-east-1) ───────────────────────────┐
+ │ every API call ──▶ CloudTrail docapi-lab-trail ──▶ audit bucket   │
+ │ every resource ──▶ AWS Config recorder + 3 rules ──▶ audit bucket │
+ │ every dollar   ──▶ Budgets $10 / $25 ──▶ email                    │
+ └────────────────────────────────────────────────────────────────────┘
+ laptop: AWS CLI v2, profile document-api (SSO, no static keys)
+```
+
+**Discovery that reshaped the cost plan** (*Claude*, from the console evidence Sandeep provided): the
+account is not new — a dormant root access key was 5015 days old, i.e. the account dates from
+**~December 2012**. No free tier, no credits: every resource bills at list price. Consequences: RDS will
+be `db.t4g.micro` rather than `small`; ALB and interface endpoints are deleted whenever idle.
+
+### Tasks
+
+**Account sign-in, Region, plan check** — *Sandeep*
+Exam topic: `EX-1.1-K03` global infrastructure (Regions) · D4 cost-management tools.
+- Switched the console from Ohio (us-east-2) to **us-east-1**; verified Credits ($0.00) and Bills (September 2026 only) pages.
+
+**P1.S1.1 — Protect root; daily admin via Identity Center** — *Sandeep* (guided)
+Exam topic: D1 Task 1.1 · `EX-1.1-S01` MFA/root best practices · `EX-1.1-K02` federation · `EX-1.1-S03` STS role sessions · `EX-1.1-K04` least privilege.
+- Root MFA (authenticator app) assigned; **13-year-old unused root access key deleted** (needed a fresh MFA-backed session — the Actions button was disabled until re-login).
+- Identity Center enabled with Organizations (one-account org); user created; **MFA required at every sign-in**; permission set `AdministratorAccess`, 4-hour session; assigned to the account; portal `https://d-90667f1516.awsapps.com/start`.
+- Gotchas met and resolved: the Identity Center user has its own password (set via the invitation / reset link, not the root password); the permission set must exist before the assign wizard lists it.
+
+**P1.S1.2 — Budgets before anything can cost money** — *Claude* (budgets) · *Sandeep* (Cost Explorer, invoices)
+Exam topic: D4 Tasks 4.1–4.4 · `EX-4.x-K02/K03` cost-management tools — Budgets *alerts*, Cost Explorer *analyses*, CUR *is data*, Anomaly Detection *finds the unexpected*.
+```bash
+aws budgets create-budget --account-id 234178676885 \
+  --budget '{"BudgetName":"docapi-lab-monthly-10usd","BudgetLimit":{"Amount":"10","Unit":"USD"},
+             "TimeUnit":"MONTHLY","BudgetType":"COST"}' \
+  --notifications-with-subscribers '[ {ACTUAL ≥100% → email}, {FORECASTED ≥100% → email} ]'
+# and the same for 25 USD
+```
+- Verified via `describe-budgets` / `describe-notifications-for-budget`: two budgets, four alerts.
+- Sandeep enabled Cost Explorer (first visit = enable; 24 h to prepare) and invoice delivery by email.
+- ⏳ *Deferred until Cost Explorer is ready:* Cost Anomaly Detection monitor.
+
+**P1.S1.5-REF — Region and tagging convention** — *Claude*
+Exam topic: `EX-1.1-K03` Regions/AZs · cost allocation tags (`EX-4.x-K01`).
+- README: Region `us-east-1`; tag set `Project / Environment / Owner / ManagedBy / Stage / DeleteAfter=2026-10-22`. `AWS_DEFAULT_REGION` in `~/.bashrc`.
+- ⏳ *Deferred:* activate `Project` and `Stage` as cost allocation tags (they appear in the console only after billing has processed tagged resources).
+
+**P1.S1.6-REF — AWS CLI v2 as the Identity Center administrator** — *Claude* (install, config) · *Sandeep* (`aws sso login`)
+Exam topic: D1 Task 1.2 · `EX-1.2-K01` — the **default credentials provider chain**: same code finds the SSO profile on the laptop and the instance role on EC2; nobody writes a key into code.
+- `winget install Amazon.AWSCLI` → 2.36.45. Wrote `~/.aws/config` directly (what `aws configure sso` would produce):
+```ini
+[sso-session document-api]
+sso_start_url = https://d-90667f1516.awsapps.com/start
+sso_region = us-east-1
+sso_registration_scopes = sso:account:access
+
+[profile document-api]
+sso_session = document-api
+sso_account_id = 234178676885
+sso_role_name = AdministratorAccess
+region = us-east-1
+output = json
+```
+- Lesson: `aws sso login` needs a live localhost callback; handing the authorisation URL across chat turns expires it, so Sandeep runs the login in his own terminal.
+- Proof: `aws sts get-caller-identity` → `arn:aws:sts::…:assumed-role/AWSReservedSSO_AdministratorAccess_…/sbarna992@gmail.com`; no `~/.aws/credentials`; `grep AKIA` empty.
+
+**P1.S1.3 — CloudTrail and AWS Config** — *Claude*
+Exam topic: `EX-1.3-K01` governance · `EX-1.2-K05` security services · `EX-2.2-S01` infrastructure integrity — CloudTrail = *who called what*; Config = *what does it look like, is it compliant*; CloudWatch = *how is it performing*; GuardDuty = *is it malicious*.
+- Audit bucket `docapi-lab-audit-ae9c73ce`: Block Public Access, SSE-S3, tagged, bucket policy with CloudTrail + Config service principals scoped by `aws:SourceArn` / `aws:SourceAccount`, and a `DenyInsecureTransport` statement.
+- Trail `docapi-lab-trail`: multi-Region, global service events, log-file validation, management events read+write, **no data events** (billable). `IsLogging: true`; first delivery confirmed; logs seen for us-east-1 and us-east-2.
+- Config: service-linked role, recorder `default` (all supported types + global, continuous), delivery channel to the audit bucket, rules `root-account-mfa-enabled`, `cloudtrail-enabled`, `s3-bucket-public-read-prohibited` — **all COMPLIANT**.
+
+```
+ API call ──▶ CloudTrail ──▶ s3://docapi-lab-audit-…/cloudtrail/AWSLogs/…   (+ digest files)
+ resource change ──▶ Config recorder ──▶ …/config/AWSLogs/…  ──▶ 3 rules ──▶ COMPLIANT
+```
+
+**P1.S1.7-REF — Cleanup ledger** — *Claude*
+Exam topic: D4 · Well-Architected cost pillar ("decommission resources"); the design version on the exam is scheduled stop/start, lifecycle policies, Trusted Advisor.
+- `docs/cleanup.md`: one row per resource with Region, creator, idle cost, exact teardown command, delete-by date. Rule: **no resource without a row.** Teardown deadline 2026-10-22, billing verified 2026-10-24.
+
+**P1.S1.4 — Organizations / SCPs on paper** — *Claude*
+Exam topic: D1 Task 1.1 · `EX-1.1-K01` multi-account access · `EX-1.1-S04` Control Tower, SCPs.
+- **ADR 12**: OU design (Security / Sandbox / Dev / Prod), an example guardrail SCP, and the two sentences — *SCPs bound, never grant; they apply to every principal in the OU including member roots, never to the management account.* No accounts or SCPs created.
+
+**Account hardening (beyond the exit criteria)** — *Sandeep* (guided)
+Exam topic: `EX-1.1-S01` root best practices; root-only tasks.
+- **IAM user and role access to Billing information** activated as root (without it `AdministratorAccess` cannot open Billing preferences — a classic exam trick).
+- **Second root MFA device**: a Windows Hello passkey on the laptop (`root-backup-windows-hello-1`), so the phone and the laptop are independent factors. AWS issues no recovery codes; the fallback is email + phone verification, so contact information was checked and a **security alternate contact** set.
+- Passwords stored in Google Password Manager: root, Identity Center portal, local `docapi` DB user.
+
+**Documentation and commits** — *Claude*
+- README "AWS account" section (plan facts, root protection, account settings, CLI, budgets, audit, tags); commits `ea7ab1b`, `389d384`; memory notes updated for future sessions.
+
+### Phase 1 — still open (both wait on Cost Explorer initialisation, ~24 h from 2026-09-14)
+- [ ] Cost Anomaly Detection monitor (daily email summary)
+- [ ] Activate `Project` and `Stage` as cost allocation tags
+
+---
+
+## Tooling installed along the way
+
+| Tool | Version | By | Why |
+|---|---|---|---|
+| AWS CLI v2 | 2.36.45 | Claude | every AWS phase |
+| `jq` | 1.8.2 | Claude | Phase 2+ verification commands parse JSON |
+| PostgreSQL | 18.6 (native Windows service) | Sandeep | local metadata store |
+| IntelliJ IDEA Ultimate | 2025.3 | Sandeep | IDE, Database tool, HTTP client |
