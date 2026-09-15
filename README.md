@@ -109,11 +109,12 @@ docs/         architecture decisions
 |---|---|
 | Region | `us-east-1` — everything lives here; ACM certificates for CloudFront must be here anyway |
 | Account plan | **Pay-as-you-go, no credits, no free tier.** Verified 2026-09-14: Credits $0.00 / 0 active; not on the credits-based plan model; the account dates from **~December 2012** (a dormant root access key was 5015 days old), so the classic 12-month free tier expired in 2013. **Every resource bills at list price from the first hour.** Free regardless: IAM, Identity Center, STS, Organizations, Budgets, S3 gateway endpoint. Sizing follows from this — RDS `db.t4g.micro` (not `small`), EC2 `t4g.small` for JVM headroom, ALB and interface endpoints deleted whenever idle. Budget alerts and same-day teardown are the only guardrails. |
-| Daily access | IAM Identity Center user with the `AdministratorAccess` permission set; root is MFA-protected and used only for root-only tasks |
-| Root recovery | AWS issues **no recovery codes** for root MFA. Redundancy is a **second registered MFA device** (root supports up to 8). If every device is lost, the only path back is AWS's "Troubleshoot MFA" flow, which verifies by email to the root address **and** a phone call to the registered number — both must stay current under Account → Contact Information. |
-| CLI profile | `document-api` (`aws configure sso`); `AWS_PROFILE=document-api`, `AWS_DEFAULT_REGION=us-east-1` |
-| Budgets | $10 and $25 per month, actual + forecasted alerts; Cost Anomaly Detection daily summary |
-| Audit | CloudTrail `docapi-lab-trail` (multi-Region); AWS Config recorder with a small rule set |
+| Daily access | IAM Identity Center user with the `AdministratorAccess` permission set (4-hour sessions). Identity Center requires MFA at every sign-in. No IAM users exist. |
+| Root protection | No root access keys. **Two MFA devices** — an authenticator app on the phone and a Windows Hello passkey on the development laptop — so losing either device alone does not lock the account. AWS issues **no recovery codes** for root MFA: if every device is lost, the only path back is the "Troubleshoot MFA" flow, which verifies by email to the root address **and** a phone call to the registered number. Contact information and a **security alternate contact** are set and must stay current. Root is used only for root-only tasks. |
+| Account settings | **IAM user and role access to Billing information** is activated. This is a root-only setting; without it even `AdministratorAccess` cannot open Billing preferences or Cost Allocation Tags. Invoices are delivered by email. Cost Explorer enabled 2026-09-14. |
+| CLI profile | `document-api` in `~/.aws/config` — SSO only, no static credentials anywhere. Sign in with `aws sso login --profile document-api`. Set `AWS_PROFILE=document-api` and `AWS_DEFAULT_REGION=us-east-1`. |
+| Budgets | `docapi-lab-monthly-10usd` and `docapi-lab-monthly-25usd`, each emailing at 100% actual and 100% forecasted spend. Cost Anomaly Detection monitor: *pending Cost Explorer initialisation*. |
+| Audit | CloudTrail `docapi-lab-trail` (multi-Region, management events, log-file validation) and AWS Config recorder `default` (all supported resources) with rules `root-account-mfa-enabled`, `cloudtrail-enabled`, `s3-bucket-public-read-prohibited` — all compliant. Both deliver to the private bucket `docapi-lab-audit-ae9c73ce`. |
 | Cleanup ledger | [`docs/cleanup.md`](docs/cleanup.md) — one row per resource, teardown **2026-10-22** |
 
 ### Tags — every resource carries these
@@ -127,5 +128,6 @@ Stage       = 01-account | 02-s3 | 03-rds | 04-ec2 | 05-identity | 06-observabil
 DeleteAfter = 2026-10-22
 ```
 
-`Project` and `Stage` are activated as cost allocation tags so Cost Explorer can group spend by phase.
+`Project` and `Stage` are to be activated as cost allocation tags so Cost Explorer can group spend by
+phase (*pending: they appear in Billing → Cost Allocation Tags once billing has processed tagged resources*).
 Tag keys are case-sensitive. Untagged = missed on teardown day.
