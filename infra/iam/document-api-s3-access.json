@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DocumentObjectAccess",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::docapi-documents-7fb3fd47/documents/*"
+    },
+    {
+      "Sid": "DocumentKeyUse",
+      "Effect": "Allow",
+      "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+      "Resource": "arn:aws:kms:us-east-1:234178676885:key/07a7a487-ef46-43cd-a0e5-d636c19e40e5"
+    }
+  ]
+}

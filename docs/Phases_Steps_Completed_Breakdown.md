@@ -5,14 +5,14 @@ working day. Step IDs (`P1.S1.2` etc.) and exam-topic mappings follow
 `SAA-C03_Replatforming_Roadmap_Final_Document.md`. "Who" = **Sandeep** (console / manual work) or
 **Claude** (code, CLI, documentation).*
 
-*Last updated: 2026-09-15. Exam: 2026-10-31. Hands-on ends: 2026-10-18.*
+*Last updated: 2026-09-26. Exam: to be rescheduled (was 2026-10-31); the calendar shifted +9 days after Sep 16–25 were lost.*
 
 | Phase | Status | Dates | Commits |
 |---|---|---|---|
 | Local build (legacy Stages 1–2) | ✅ Done | 2026-09-02 | `4516aaa` … `02ff2c2` (7 commits) |
 | Phase 0 — Readiness check | ✅ Done | 2026-09-14 | `a30018a`, tag `v0-local-baseline` |
 | Phase 1 — AWS account foundation | ✅ Done (2 items deferred ~24h) | 2026-09-14 → 15 | `ea7ab1b`, `389d384` |
-| Phase 2 — Files to Amazon S3 | ⏳ Next | planned Sep 17–20 | — |
+| Phase 2 — Files to Amazon S3 | 🔄 In progress (day 1 of 4 done) | 2026-09-26 → 29 | see below |
 
 ---
 
@@ -246,3 +246,72 @@ Exam topic: `EX-1.1-S01` root best practices; root-only tasks.
 | `jq` | 1.8.2 | Claude | Phase 2+ verification commands parse JSON |
 | PostgreSQL | 18.6 (native Windows service) | Sandeep | local metadata store |
 | IntelliJ IDEA Ultimate | 2025.3 | Sandeep | IDE, Database tool, HTTP client |
+
+---
+
+## Phase 2 — Files to Amazon S3 (2026-09-26 → 29)
+
+**What the phase is.** Move the one stateful thing Phase 0 found — bytes on the laptop's disk — into a
+private, encrypted, versioned S3 bucket, and change the API so it brokers access with presigned URLs
+and never touches bytes. The API stays on the laptop with local PostgreSQL ("prove it from the laptop
+before moving it"). Four working days: infrastructure → code → confirm-and-test → S3 feature tour.
+
+**Schedule note.** Planned for Sep 17–20; nine days were lost, so the whole calendar shifted +9 days.
+Day 1 was Saturday 2026-09-26.
+
+### Day 1 (2026-09-26) — infrastructure, no code
+
+```
+ Sandeep (console / CLI)                            Claude (CLI verification)
+ ───────────────────────                            ─────────────────────────
+ KMS key alias/document-api ──────────────────────▶ describe-key, rotation status, key policy
+ bucket docapi-documents-7fb3fd47 ────────────────▶ BPA x4, versioning, SSE-KMS + Bucket Key, tags
+ IAM policy DocumentApiS3Access (wrote the JSON) ─▶ simulate-custom-policy x9; created policy == repo file
+ bucket policy applied ───────────────────────────▶ authenticated plain-HTTP HeadObject → 403
+ legacy IAM policy simulator driven
+```
+
+**Phase 1 leftovers closed** — *Sandeep*
+Exam topic: D4 · Cost Anomaly Detection vs Budgets (`EX-4.x-K02/K03`).
+- Cost Anomaly Detection monitor created (AWS services; alert threshold **$5**, not the $400 default — on a $25–50/month account $400 would never fire; $5 catches a forgotten ALB within about ten days).
+- `Project` and `Stage` activated as cost allocation tags.
+
+**P2.S2.1 — Private, encrypted, versioned bucket** — *Sandeep* (console) · *Claude* (verification)
+Exam topic: D1 Task 1.3 · `EX-1.3-K04` encryption and key management · `EX-1.3-S02` at rest with KMS · `EX-1.3-K02` versioning as recovery · D3 Task 3.1 · `EX-3.1-K02/K03` object vs file vs block.
+- KMS: symmetric customer-managed key, alias `document-api`, rotation on (365 days), tagged. The wizard was run with **no key administrators and no key users**, so the generated key policy has exactly one statement — `kms:*` to the account root — the delegation that lets IAM policies govern the key. The application's KMS rights therefore live only in its IAM policy.
+- Bucket: `docapi-documents-7fb3fd47`, us-east-1, ACLs disabled (`BucketOwnerEnforced`), Block Public Access ×4, versioning **Enabled**, default encryption `aws:kms` with the key, Bucket Key on, tagged.
+- Verified: test object `documents/hello.txt` → `head-object` shows `ServerSideEncryption: aws:kms`, the key ARN, `BucketKeyEnabled: true` and a **VersionId**; anonymous HTTPS GET → `403`; anonymous listing → `403`; authenticated GET returns the content.
+- Lesson recorded: a versioned bucket is never "empty" after `aws s3 rm` — delete markers and noncurrent versions remain — so the teardown row says *delete all versions and delete markers*.
+
+**P2.S2.4 — Least-privilege S3 + KMS permissions** — *Sandeep* (wrote the policy from requirements, created it, applied the bucket policy, drove the simulator) · *Claude* (review, CLI simulation, TLS-only bucket policy)
+Exam topic: D1 Task 1.1 · `EX-1.1-K04` least privilege · `EX-1.1-S02` identity policies · `EX-1.1-S05` resource policies · Task 1.3 · `EX-1.3-S04` key access policies · `EX-1.3-S03` encryption in transit.
+- Identity policy `infra/iam/document-api-s3-access.json`:
+
+```json
+{ "Sid": "DocumentObjectAccess", "Effect": "Allow",
+  "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+  "Resource": "arn:aws:s3:::docapi-documents-7fb3fd47/documents/*" },
+{ "Sid": "DocumentKeyUse", "Effect": "Allow",
+  "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+  "Resource": "arn:aws:kms:us-east-1:234178676885:key/07a7a487-…" }
+```
+
+  Created as `DocumentApiS3Access`; attached to nothing until Phase 4. No `ListBucket`: `HeadObject` is authorised by `GetObject`, and bucket-level actions would belong on the bucket ARN, not `/*`.
+- CLI simulation (`aws iam simulate-custom-policy`; the policy must be passed as a string — `file://` is rejected for this parameter), nine cases:
+
+| Action | Resource | Decision |
+|---|---|---|
+| Get / Put / DeleteObject | `…/documents/x` | allowed |
+| GetObject | `…/other/x` | implicitDeny |
+| PutBucketPolicy, ListBucket | bucket | implicitDeny |
+| kms:Decrypt, kms:GenerateDataKey | key | allowed |
+| kms:ScheduleKeyDeletion | key | implicitDeny |
+
+  Every denial is **implicit** — the absence of an Allow. An explicit deny overrides allows from other policies; an implicit one does not.
+- Bucket policy `infra/s3/bucket-policy.json`: resource-based (it has a `Principal`), an explicit `Deny s3:*` for `Principal: "*"` when `aws:SecureTransport` is `false`, on **both** the bucket ARN and `/*`.
+- **Proof that an explicit deny wins:** an authenticated `HeadObject` as `AdministratorAccess` over `http://` → `403`; over `https://` → success. The identity allows everything; the resource policy still refuses.
+- Simulator UI: the legacy simulator (policysim.aws.amazon.com) in *New Policy* mode kept evaluating against resource `*` regardless of the ARN entered (`Resource Type: not required`), a known limitation of that mode; `*` answers "allowed on *any* resource?". Driven far enough to see allowed vs implicitly denied and the bucket's resource policy pulled into the evaluation. The CLI results are authoritative.
+
+**Close-out** — *Claude*: cleanup ledger rows for the key (delete *after* the bucket; objects become unreadable the moment the key is disabled), bucket, policy and bucket policy; README section "Document storage on S3"; this entry.
+
+**Day 1 exit state:** bucket, key and least-privilege policy exist and are proven; nothing in the application has changed yet. **Next (day 2): P2.S2.2** — AWS SDK for Java v2, `DocumentStorage` gains presigned-URL methods, `S3DocumentStorage`, and the API hands out presigned PUT/GET URLs from the laptop.

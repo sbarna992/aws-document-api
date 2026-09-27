@@ -128,6 +128,18 @@ Stage       = 01-account | 02-s3 | 03-rds | 04-ec2 | 05-identity | 06-observabil
 DeleteAfter = 2026-10-22
 ```
 
-`Project` and `Stage` are to be activated as cost allocation tags so Cost Explorer can group spend by
-phase (*pending: they appear in Billing → Cost Allocation Tags once billing has processed tagged resources*).
-Tag keys are case-sensitive. Untagged = missed on teardown day.
+`Project` and `Stage` are activated as cost allocation tags (2026-09-26) so Cost Explorer can group
+spend by phase. Tag keys are case-sensitive. Untagged = missed on teardown day.
+
+## Document storage on S3 (Phase 2)
+
+| Item | Value |
+|---|---|
+| Bucket | `docapi-documents-7fb3fd47` (us-east-1). Block Public Access on all four settings, ACLs disabled, **versioning on**, default encryption **SSE-KMS** with the key below and S3 Bucket Keys on. Objects live under the `documents/` prefix. |
+| KMS key | `alias/document-api` → `arn:aws:kms:us-east-1:234178676885:key/07a7a487-ef46-43cd-a0e5-d636c19e40e5`, symmetric, automatic rotation yearly. The key policy has the single default statement delegating to IAM; no key administrators or users are named, so all KMS access for the application is granted by its IAM policy. |
+| Application policy | `DocumentApiS3Access` — [`infra/iam/document-api-s3-access.json`](infra/iam/document-api-s3-access.json): `s3:GetObject/PutObject/DeleteObject` on `documents/*` only, plus `kms:GenerateDataKey` and `kms:Decrypt` on the key. No `ListBucket` (HeadObject is authorised by GetObject). Attached to nothing until Phase 4's instance role. Verified by simulation: object actions allowed under `documents/`, denied elsewhere; bucket-level actions denied. |
+| Bucket policy | [`infra/s3/bucket-policy.json`](infra/s3/bucket-policy.json) — one explicit `Deny` of `s3:*` when `aws:SecureTransport` is false. Verified: an authenticated `HeadObject` over plain HTTP returns `403`; the same call over HTTPS succeeds. |
+
+The four gates every request passes: Block Public Access → bucket policy → identity policy → KMS key
+policy. An explicit deny anywhere wins; within one account either the identity or the resource policy
+must allow; a missing KMS permission produces an `AccessDenied` that looks like an S3 error.
