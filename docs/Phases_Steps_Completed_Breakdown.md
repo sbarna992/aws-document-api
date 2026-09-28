@@ -5,14 +5,14 @@ working day. Step IDs (`P1.S1.2` etc.) and exam-topic mappings follow
 `SAA-C03_Replatforming_Roadmap_Final_Document.md`. "Who" = **Sandeep** (console / manual work) or
 **Claude** (code, CLI, documentation).*
 
-*Last updated: 2026-09-26. Exam: to be rescheduled (was 2026-10-31); the calendar shifted +9 days after Sep 16–25 were lost.*
+*Last updated: 2026-09-28. Exam: to be rescheduled (was 2026-10-31); the calendar shifted +9 days after Sep 16–25 were lost.*
 
 | Phase | Status | Dates | Commits |
 |---|---|---|---|
 | Local build (legacy Stages 1–2) | ✅ Done | 2026-09-02 | `4516aaa` … `02ff2c2` (7 commits) |
 | Phase 0 — Readiness check | ✅ Done | 2026-09-14 | `a30018a`, tag `v0-local-baseline` |
 | Phase 1 — AWS account foundation | ✅ Done (2 items deferred ~24h) | 2026-09-14 → 15 | `ea7ab1b`, `389d384` |
-| Phase 2 — Files to Amazon S3 | 🔄 In progress (day 1 of 4 done) | 2026-09-26 → 29 | see below |
+| Phase 2 — Files to Amazon S3 | 🔄 In progress (day 2 of 4 done) | 2026-09-26 → ~30 | see below |
 
 ---
 
@@ -315,3 +315,42 @@ Exam topic: D1 Task 1.1 · `EX-1.1-K04` least privilege · `EX-1.1-S02` identity
 **Close-out** — *Claude*: cleanup ledger rows for the key (delete *after* the bucket; objects become unreadable the moment the key is disabled), bucket, policy and bucket policy; README section "Document storage on S3"; this entry.
 
 **Day 1 exit state:** bucket, key and least-privilege policy exist and are proven; nothing in the application has changed yet. **Next (day 2): P2.S2.2** — AWS SDK for Java v2, `DocumentStorage` gains presigned-URL methods, `S3DocumentStorage`, and the API hands out presigned PUT/GET URLs from the laptop.
+
+### Day 2 (2026-09-27, verification run 2026-09-28 morning) — the code: P2.S2.2
+
+```
+ documents.storage.type=local (default)            documents.storage.type=s3
+ ───────────────────────────────────────            ──────────────────────────────────────────────
+ LocalFileSystemStorage                             S3DocumentStorage ── S3Client + S3Presigner
+   presignedUploadUrl   → empty                       presignedUploadUrl   → https://<bucket>.s3…?X-Amz-…
+   → controller falls back to the API's              → client PUTs to S3 directly; Content-Type is
+     own PUT /documents/{id}/content                    a signed header; the API never sees bytes
+ 30 tests unchanged, green                          run config "AwsDocumentApiApplication (S3)"
+```
+
+**P2.S2.2 — Implement `S3DocumentStorage` and generate presigned URLs** — *Claude* (SDK, interface, adapter, wiring, ADR) · *Sandeep* (run configuration, the three decisions, `exists()`/`delete()`, the verification run, explain-it-back)
+Exam topic: D1 Task 1.2 · `EX-1.2-K04` secure application access (presigned URLs) · `EX-1.2-K01` credentials security (default credentials provider chain) · D3 Task 3.1 · `EX-3.1-S01` direct client-to-S3 transfer · D2 · `EX-2.1-K04` stateless workloads · D4 · `EX-4.1-S01` individual vs multipart uploads.
+
+- **SDK** (*Claude*): `software.amazon.awssdk:bom` **2.55.6** (looked up on Maven Central, not copied from a tutorial) in `dependencyManagement`; modules `s3`, `sso`, `ssooidc` (the last two read the Identity Center profile on the laptop; EC2's instance role needs neither). Dependency tree checked: the SDK brings only its shaded `third-party-jackson-core`; Boot's Jackson 3 (`tools.jackson`) stays the single `jackson-databind`.
+- **Interface** (*Claude*): `DocumentStorage` gains `Optional<URI> presignedUploadUrl(key, contentType)` and `Optional<URI> presignedDownloadUrl(key)`. The local adapter returns empty and the controller falls back to the API's own `/content` endpoints — "a storage that can presign returns a URL; otherwise the API serves the bytes". The TTL is the adapter's own configuration, so callers never know S3 exists.
+- **Adapter** (*Claude* + *Sandeep*): `S3DocumentStorage` behind `@ConditionalOnProperty(documents.storage.type=s3)`; `S3StorageProperties` (bucket, prefix `documents/`, TTL `PT15M`); `S3Config` creating `S3Client.create()` and `S3Presigner.create()` — **no credential, no Region in code**. `store` spools to a temp file (S3 needs a length; real uploads never pass through it); `load` wraps the response stream with S3's reported length. **Sandeep wrote `delete()`** (`DeleteObjectRequest`, idempotent, adds a delete marker on a versioned bucket) **and `exists()`** (`HeadObjectRequest`, `false` only on `NoSuchKeyException` — an `AccessDenied` must propagate, never masquerade as "not found"). Selection by **property, not profile**, so the plain local run and the test suite are untouched.
+- **Decisions** (*Sandeep*, ADR 13): **A** the adapter prepends `documents/`, database rows unchanged; **B** 15-minute URLs, overridable by `DOCAPI_PRESIGN_TTL`; **C** presigned **PUT** (fits the contract, one SDK call) — accepting that only presigned **POST** can make S3 enforce a size limit (`content-length-range`), so size is enforced after the fact by the confirm endpoint / event consumer.
+- **A leftover found and fixed** (*Claude*): the first `verify` failed on a repository test because a `proposal.txt` row from the Sept 14 manual walkthrough was still in the shared local database. Row and orphan file removed; the repository test now uses a unique owner per run, as the end-to-end test already did (ADR 8's trade-off, felt).
+- **Verification run** (*Sandeep*, via `scripts/s3-smoke.sh`, which prints the expectation before each check):
+
+| # | Check | Result |
+|---|---|---|
+| 0 | `POST /documents` | `201`; upload URL on the bucket host, `X-Amz-Expires=900`, `SignedHeaders=content-type;host`, and an `X-Amz-Security-Token` — the signer's credentials are temporary (SSO) |
+| 2 | `PUT` bytes to the presigned URL | `200` — the API was never involved |
+| 3 | Listing under `documents/` | the new object present |
+| 4 | `head-object` | `aws:kms`, the lab key, a `VersionId` |
+| 5 | **The gap** | `["PENDING_UPLOAD", null]` — bytes in S3, the API does not know; closed tomorrow (S2.8) |
+| 6 | Same URL, `Content-Type: image/png` | `403 SignatureDoesNotMatch` — the signed header pins the declared type |
+| 7 | Same URL over plain `http://` | **`400 InvalidArgument`**, not the expected `403` — see below |
+| 8 | Expired URL (`DOCAPI_PRESIGN_TTL=PT10S`) | *manual; pending* |
+| 9 | `DELETE /documents/{id}` (Sandeep's `delete()`) | `204`; the key gone from the listing, a **delete marker** left behind |
+
+- **Check 7, investigated** (*Claude*): two independent gates refuse plain HTTP, and the order decides the code. A plain-HTTP **GET** of any object in the bucket → `403 AccessDenied` *"explicit deny in a resource-based policy"* — the Day-1 bucket policy, working. A plain-HTTP **PUT** that will be SSE-KMS encrypted → `400 InvalidArgument` *"Requests specifying Server Side Encryption with AWS KMS managed keys must be made over a secure connection"* — S3's own rule, checked during request validation, **before** authorization. Proof: the same PUT with explicit `--sse AES256` (no KMS) → `403` from the bucket policy. Lesson: the TLS-only bucket policy is belt-and-braces on top of a KMS-specific rule S3 enforces itself; a different status code is not a weaker refusal.
+- **Explain-it-back** (*Sandeep*, all three essentially right; notes recorded): (1) credentials come from the **default credentials provider chain** — `AWS_PROFILE` only *names* the profile; the profile's SSO session token (cached by `aws sso login`) is exchanged for short-lived role credentials, which is why the URL carries a security token and dies with the session; on EC2 the chain ends at the **instance profile** via IMDS. (2) A presigned URL does **not** bypass IAM: it runs as the signer, inside all four gates, and only until it expires. (3) The API never sees the bytes, so it cannot enforce a size limit; only a presigned **POST** policy's `content-length-range` makes S3 do it.
+
+**Day 2 exit state:** the API on the laptop hands out presigned S3 URLs; bytes never touch it; 30 tests green with the default local adapter; the upload-confirmation gap is visible and deliberate. Bucket left with only `documents/hello.txt` (smoke-test object and its delete marker removed). **Next (day 3): P2.S2.8** temporary confirm endpoint, **P2.S2.3** presign unit test + opt-in integration test + `.http` walkthrough against S3.

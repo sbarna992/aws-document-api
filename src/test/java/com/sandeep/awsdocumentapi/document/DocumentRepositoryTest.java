@@ -20,9 +20,13 @@ class DocumentRepositoryTest {
     @Autowired
     private DocumentRepository repository;
 
+    /** Unique per test instance: the local database is shared with development data (ADR 8). */
+    private final String alice = "alice-" + UUID.randomUUID();
+    private final String bob = "bob-" + UUID.randomUUID();
+
     @Test
     void savesWithGeneratedTimestampsAndPendingStatus() {
-        Document saved = repository.saveAndFlush(newDocument("alice", "proposal.pdf"));
+        Document saved = repository.saveAndFlush(newDocument(alice, "proposal.pdf"));
 
         assertThat(saved.getStatus()).isEqualTo(DocumentStatus.PENDING_UPLOAD);
         assertThat(saved.getFileSize()).isNull();
@@ -32,21 +36,21 @@ class DocumentRepositoryTest {
 
     @Test
     void listsOnlyTheOwnersDocumentsNewestFirst() {
-        Document first = repository.saveAndFlush(newDocument("alice", "first.pdf"));
-        Document second = repository.saveAndFlush(newDocument("alice", "second.pdf"));
-        repository.saveAndFlush(newDocument("bob", "bobs.pdf"));
+        Document first = repository.saveAndFlush(newDocument(alice, "first.pdf"));
+        Document second = repository.saveAndFlush(newDocument(alice, "second.pdf"));
+        repository.saveAndFlush(newDocument(bob, "bobs.pdf"));
 
-        assertThat(repository.findByOwnerIdOrderByCreatedAtDesc("alice"))
+        assertThat(repository.findByOwnerIdOrderByCreatedAtDesc(alice))
                 .extracting(Document::getId)
                 .containsExactly(second.getId(), first.getId());
     }
 
     @Test
     void lookupIsScopedToOwner() {
-        Document doc = repository.saveAndFlush(newDocument("alice", "secret.pdf"));
+        Document doc = repository.saveAndFlush(newDocument(alice, "secret.pdf"));
 
-        assertThat(repository.findByIdAndOwnerId(doc.getId(), "alice")).isPresent();
-        assertThat(repository.findByIdAndOwnerId(doc.getId(), "bob")).isEmpty();
+        assertThat(repository.findByIdAndOwnerId(doc.getId(), alice)).isPresent();
+        assertThat(repository.findByIdAndOwnerId(doc.getId(), bob)).isEmpty();
     }
 
     private static Document newDocument(String owner, String filename) {

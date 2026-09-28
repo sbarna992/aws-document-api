@@ -2,6 +2,7 @@ package com.sandeep.awsdocumentapi.storage;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Component;
@@ -9,12 +10,15 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Optional;
 
 @Slf4j
 @Component
+@ConditionalOnProperty(name = "documents.storage.type", havingValue = "local", matchIfMissing = true)
 public class LocalFileSystemStorage implements DocumentStorage {
 
     private final Path root;
@@ -75,6 +79,17 @@ public class LocalFileSystemStorage implements DocumentStorage {
     @Override
     public boolean exists(String storageKey) {
         return Files.isRegularFile(resolve(storageKey));
+    }
+
+    /** A directory cannot hand out URLs; the API accepts the bytes itself (PUT /documents/{id}/content). */
+    @Override
+    public Optional<URI> presignedUploadUrl(String storageKey, String contentType) {
+        return Optional.empty();
+    }
+
+    @Override
+    public Optional<URI> presignedDownloadUrl(String storageKey) {
+        return Optional.empty();
     }
 
     /** Maps a key to a path and refuses anything that would escape the root ("../"). */

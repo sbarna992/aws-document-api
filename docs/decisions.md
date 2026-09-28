@@ -218,3 +218,49 @@ be read from outside it"). Control Tower is the answer to "set up a multi-accoun
 best-practice guardrails quickly"; it builds on Organizations.
 
 **Consequences.** Zero cost, zero teardown. Revisited in Phase 15's Task 1.1 close-out.
+
+## 13. S3 storage adapter and presigned URLs (Phase 2, P2.S2.2, 2026-09-27)
+
+**Context.** Bytes move from the laptop's disk to the bucket built in P2.S2.1. The API must stop
+touching bytes: clients upload to and download from S3 directly through presigned URLs, and the API
+only decides who may do what. `DocumentStorage` gains a second implementation, which is the moment
+ADR 2 said the interface would grow.
+
+**Decisions.**
+
+- **A — key layout: the S3 adapter prepends `documents/`.** The database keeps `<uuid>-<filename>`
+  with no prefix, so rows are identical whichever adapter is active and the local adapter is
+  untouched. The prefix is an S3 concern (the IAM policy, the lifecycle rule and event filters are
+  scoped to it), not a domain concern. Consequence: Phase 9's event consumer strips the prefix from
+  the S3 key before looking the row up. Rejected: generating `documents/<uuid>-<filename>` in the
+  service for both adapters (a bigger change; the local directory would grow a subfolder).
+- **B — presigned URL lifetime: 15 minutes** (`documents.storage.s3.presign-ttl`, overridable by
+  `DOCAPI_PRESIGN_TTL`). Long enough for a slow upload, short enough that a leaked URL is worthless
+  quickly. A URL is also bounded by the *signer's* credential lifetime, whichever ends first.
+- **C — presigned PUT, not presigned POST.** The two-phase contract already assumes a PUT and the
+  SDK's `S3Presigner` produces one directly. What is given up: only presigned POST can make S3 enforce
+  a **maximum size** (`content-length-range`). Size is therefore enforced *after the fact* — the
+  confirm endpoint (P2.S2.8) and later the S3 event consumer (Phase 9) read the object's size and
+  fail oversized documents. Exam framing for the other case: "reject oversized uploads *before* they
+  are stored" → presigned POST with `content-length-range`.
+- **Adapter selection by property, not profile:** `documents.storage.type=local|s3`
+  (`DOCAPI_STORAGE_TYPE`), defaulting to `local`, so the test suite and the plain local run are
+  unchanged and the S3 run is a separate IntelliJ run configuration.
+- **`Optional<URI>` on the interface.** `presignedUploadUrl` / `presignedDownloadUrl` return empty
+  from the local adapter and the controller falls back to the API's own `/content` endpoints. "A
+  storage that can presign returns a URL; otherwise the API serves the bytes." The TTL is the
+  adapter's own configuration, so callers never know S3 exists.
+- **No credential and no Region in code.** `S3Client.create()` and `S3Presigner.create()` use the
+  SDK's default provider chains: the Identity Center SSO profile and `AWS_REGION` on the laptop, the
+  instance role and instance Region on EC2 (Phase 4) — the same JAR, no change.
+- **`Content-Type` is a signed header** on the presigned PUT, so the client must send exactly the
+  type it declared at `POST /documents`.
+
+**Consequences.** After a presigned upload the row stays `PENDING_UPLOAD`: nothing tells the API the
+bytes arrived (the "upload-confirmation gap"). Deliberately left open today; P2.S2.8 adds a temporary
+confirm endpoint, Phase 9 replaces it with S3 events that do not trust the client. `store()` on the
+S3 adapter spools to a temp file because the interface hands it a bare stream; real uploads never
+pass through it.
+
+**Revisited in.** P2.S2.8 (confirm endpoint), Phase 9 (events, prefix stripping), Phase 4 (instance
+role exercises the KMS gate for real).

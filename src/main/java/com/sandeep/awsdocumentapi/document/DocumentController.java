@@ -44,7 +44,9 @@ public class DocumentController {
                                                           @Valid @RequestBody CreateDocumentRequest request) {
         Document document = service.create(ownerId, request);
         URI location = currentRequest().path("/{id}").buildAndExpand(document.getId()).toUri();
-        URI uploadUrl = currentRequest().path("/{id}/content").buildAndExpand(document.getId()).toUri();
+        // Presigned S3 URL when storage can take the bytes directly; otherwise this API's own upload endpoint.
+        URI uploadUrl = service.uploadUrl(document)
+                .orElseGet(() -> currentRequest().path("/{id}/content").buildAndExpand(document.getId()).toUri());
         return ResponseEntity.created(location)
                 .body(new DocumentCreatedResponse(DocumentResponse.from(document), uploadUrl));
     }
@@ -67,7 +69,8 @@ public class DocumentController {
         Document document = service.get(ownerId, id);
         URI downloadUrl = document.getStatus() == DocumentStatus.PENDING_UPLOAD
                 ? null
-                : currentRequest().path("/content").build().toUri();
+                : service.downloadUrl(document)
+                        .orElseGet(() -> currentRequest().path("/content").build().toUri());
         return new DocumentDetailResponse(DocumentResponse.from(document), downloadUrl);
     }
 

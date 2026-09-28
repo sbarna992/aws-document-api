@@ -140,6 +140,12 @@ spend by phase. Tag keys are case-sensitive. Untagged = missed on teardown day.
 | Application policy | `DocumentApiS3Access` — [`infra/iam/document-api-s3-access.json`](infra/iam/document-api-s3-access.json): `s3:GetObject/PutObject/DeleteObject` on `documents/*` only, plus `kms:GenerateDataKey` and `kms:Decrypt` on the key. No `ListBucket` (HeadObject is authorised by GetObject). Attached to nothing until Phase 4's instance role. Verified by simulation: object actions allowed under `documents/`, denied elsewhere; bucket-level actions denied. |
 | Bucket policy | [`infra/s3/bucket-policy.json`](infra/s3/bucket-policy.json) — one explicit `Deny` of `s3:*` when `aws:SecureTransport` is false. Verified: an authenticated `HeadObject` over plain HTTP returns `403`; the same call over HTTPS succeeds. |
 
+| Runtime switch | `documents.storage.type=local` (default) keeps bytes in `./local-storage`; `documents.storage.type=s3` uses the bucket. With `s3`, `POST /documents` returns a **presigned PUT** URL and `GET /documents/{id}` a **presigned GET** URL (15-minute TTL, `DOCAPI_PRESIGN_TTL`); the API never touches bytes. The `Content-Type` declared at creation is a signed header. Neither SDK client is given a credential or Region — the default provider chains supply them (SSO profile on the laptop, instance role on EC2). See ADR 13. |
+| Running against S3 from IntelliJ | A second run configuration, *AwsDocumentApiApplication (S3)*, with environment variables `AWS_PROFILE=document-api`, `AWS_REGION=us-east-1`, `DOCAPI_STORAGE_TYPE=s3`, `DOCAPI_BUCKET=docapi-documents-7fb3fd47`. Run `aws sso login --profile document-api` first. `scripts/s3-smoke.sh` exercises the presigned flow end to end and prints the expected result before each check. |
+
 The four gates every request passes: Block Public Access → bucket policy → identity policy → KMS key
 policy. An explicit deny anywhere wins; within one account either the identity or the resource policy
-must allow; a missing KMS permission produces an `AccessDenied` that looks like an S3 error.
+must allow; a missing KMS permission produces an `AccessDenied` that looks like an S3 error. One
+more gate sits in front of them all for SSE-KMS objects: S3 refuses a plain-HTTP PUT with
+`400 InvalidArgument` ("must be made over a secure connection") during request validation, before
+the bucket policy's `403` gets a turn.

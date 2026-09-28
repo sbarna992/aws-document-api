@@ -11,7 +11,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.InputStream;
+import java.net.URI;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Slf4j
@@ -46,6 +48,19 @@ public class DocumentService {
     @Transactional(readOnly = true)
     public List<Document> list(String ownerId) {
         return repository.findByOwnerIdOrderByCreatedAtDesc(ownerId);
+    }
+
+    /**
+     * Where the client should send the bytes, if storage can take them directly (a presigned S3 PUT).
+     * Empty means the API accepts them itself. Ownership was checked by whoever loaded the document.
+     */
+    public Optional<URI> uploadUrl(Document document) {
+        return storage.presignedUploadUrl(document.getStorageKey(), document.getContentType());
+    }
+
+    /** Where the client can fetch the bytes directly (a presigned S3 GET), or empty if the API serves them. */
+    public Optional<URI> downloadUrl(Document document) {
+        return storage.presignedDownloadUrl(document.getStorageKey());
     }
 
     /**
