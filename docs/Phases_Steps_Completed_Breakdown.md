@@ -347,7 +347,7 @@ Exam topic: D1 Task 1.2 · `EX-1.2-K04` secure application access (presigned URL
 | 5 | **The gap** | `["PENDING_UPLOAD", null]` — bytes in S3, the API does not know; closed tomorrow (S2.8) |
 | 6 | Same URL, `Content-Type: image/png` | `403 SignatureDoesNotMatch` — the signed header pins the declared type |
 | 7 | Same URL over plain `http://` | **`400 InvalidArgument`**, not the expected `403` — see below |
-| 8 | Expired URL (`DOCAPI_PRESIGN_TTL=PT10S`) | *manual; pending* |
+| 8 | Expired URL (`DOCAPI_PRESIGN_TTL=PT10S`, PUT after 15 s) | `403` — the request has expired; a URL is worthless after its TTL even with a valid signature |
 | 9 | `DELETE /documents/{id}` (Sandeep's `delete()`) | `204`; the key gone from the listing, a **delete marker** left behind |
 
 - **Check 7, investigated** (*Claude*): two independent gates refuse plain HTTP, and the order decides the code. A plain-HTTP **GET** of any object in the bucket → `403 AccessDenied` *"explicit deny in a resource-based policy"* — the Day-1 bucket policy, working. A plain-HTTP **PUT** that will be SSE-KMS encrypted → `400 InvalidArgument` *"Requests specifying Server Side Encryption with AWS KMS managed keys must be made over a secure connection"* — S3's own rule, checked during request validation, **before** authorization. Proof: the same PUT with explicit `--sse AES256` (no KMS) → `403` from the bucket policy. Lesson: the TLS-only bucket policy is belt-and-braces on top of a KMS-specific rule S3 enforces itself; a different status code is not a weaker refusal.
