@@ -1,3 +1,16 @@
+GET http://localhost:80/api/item?id=99
+Accept: application/json
+
+###
+GET http://localhost:80/api/item?id=99
+Accept: application/json
+
+###
+# One client flow for both storages. Pick the environment at the top of the editor:
+#   local -> the plain run configuration; uploadUrl / downloadUrl point back at this API
+#   s3    -> the "(S3)" run configuration;  uploadUrl / downloadUrl are presigned S3 URLs
+# The client never needs to know which: it sends the bytes wherever uploadUrl says.
+
 ### Health
 GET {{host}}/actuator/health
 
@@ -20,7 +33,19 @@ X-User-Id: {{user}}
     client.global.set("uploadUrl", response.body.uploadUrl);
 %}
 
-### 2. Upload the bytes to the upload URL
+### 1b. Confirm before any bytes were sent -> 409 (the API asks storage, storage has nothing)
+POST {{host}}/documents/{{documentId}}/uploaded
+X-User-Id: {{user}}
+
+> {%
+    client.test("refused before upload", function () {
+        client.assert(response.status === 409, "expected 409, got " + response.status);
+    });
+%}
+
+### 2. Upload the bytes to the upload URL (the API on local, S3 directly on s3)
+# Content-Type must match the create request: on S3 it is a signed header. X-User-Id is needed by the
+# local endpoint and ignored by S3 (it is not one of the signed headers).
 PUT {{uploadUrl}}
 Content-Type: text/plain
 X-User-Id: {{user}}
@@ -29,13 +54,25 @@ X-User-Id: {{user}}
 
 > {%
     client.test("uploaded", function () {
-        client.assert(response.status === 200);
-        client.assert(response.body.status === "UPLOADED");
-        client.assert(response.body.fileSize > 0);
+        client.assert(response.status === 200, "expected 200, got " + response.status);
     });
 %}
 
-### 3. Read metadata -> now includes a download URL
+### 3. Confirm the upload (temporary, P2.S2.8; Phase 9 replaces it with an S3 event)
+POST {{host}}/documents/{{documentId}}/uploaded
+X-User-Id: {{user}}
+
+> {%
+    client.test("confirmed", function () {
+        client.assert(response.status === 200, "expected 200, got " + response.status);
+        client.assert(response.body.document.status === "UPLOADED");
+        client.assert(response.body.document.fileSize > 0);
+        client.assert(response.body.downloadUrl != null);
+    });
+    client.global.set("downloadUrl", response.body.downloadUrl);
+%}
+
+### 4. Read metadata -> includes the download URL
 GET {{host}}/documents/{{documentId}}
 X-User-Id: {{user}}
 
@@ -43,14 +80,19 @@ X-User-Id: {{user}}
     client.test("has download url", function () {
         client.assert(response.body.downloadUrl != null);
     });
-    client.global.set("downloadUrl", response.body.downloadUrl);
 %}
 
-### 4. Download the bytes
+### 5. Download the bytes (the API on local, S3 directly on s3)
 GET {{downloadUrl}}
 X-User-Id: {{user}}
 
-### 4b. Trigger asynchronous processing (202)
+> {%
+    client.test("downloaded", function () {
+        client.assert(response.status === 200, "expected 200, got " + response.status);
+    });
+%}
+
+### 6. Trigger asynchronous processing (202)
 POST {{host}}/documents/{{documentId}}/process
 X-User-Id: {{user}}
 
@@ -61,7 +103,7 @@ X-User-Id: {{user}}
     });
 %}
 
-### 4c. Poll: should now be PROCESSED with a checksum
+### 7. Poll: should now be PROCESSED with a checksum (re-run this one if Run All is faster than the worker)
 GET {{host}}/documents/{{documentId}}
 X-User-Id: {{user}}
 
@@ -72,23 +114,41 @@ X-User-Id: {{user}}
     });
 %}
 
-### 5. List my documents
+### 8. List my documents
 GET {{host}}/documents
 X-User-Id: {{user}}
 
-### 6. Another user cannot see it (404, not 403 - we don't confirm the id exists)
+### 9. Another user cannot see it (404, not 403 - we don't confirm the id exists)
 GET {{host}}/documents/{{documentId}}
 X-User-Id: someone-else
 
-### 7. Delete metadata and bytes
+> {%
+    client.test("hidden from others", function () {
+        client.assert(response.status === 404);
+    });
+%}
+
+### 10. Delete metadata and bytes
 DELETE {{host}}/documents/{{documentId}}
 X-User-Id: {{user}}
 
-### 8. Gone
+> {%
+    client.test("deleted", function () {
+        client.assert(response.status === 204);
+    });
+%}
+
+### 11. Gone
 GET {{host}}/documents/{{documentId}}
 X-User-Id: {{user}}
 
-### Validation failure example
+> {%
+    client.test("gone", function () {
+        client.assert(response.status === 404);
+    });
+%}
+
+### Validation failure example (400)
 POST {{host}}/documents
 Content-Type: application/json
 X-User-Id: {{user}}

@@ -5,14 +5,14 @@ working day. Step IDs (`P1.S1.2` etc.) and exam-topic mappings follow
 `SAA-C03_Replatforming_Roadmap_Final_Document.md`. "Who" = **Sandeep** (console / manual work) or
 **Claude** (code, CLI, documentation).*
 
-*Last updated: 2026-09-28. Exam: to be rescheduled (was 2026-10-31); the calendar shifted +9 days after Sep 16–25 were lost.*
+*Last updated: 2026-09-29. Exam: to be rescheduled (was 2026-10-31); the calendar shifted +9 days after Sep 16–25 were lost.*
 
 | Phase | Status | Dates | Commits |
 |---|---|---|---|
 | Local build (legacy Stages 1–2) | ✅ Done | 2026-09-02 | `4516aaa` … `02ff2c2` (7 commits) |
 | Phase 0 — Readiness check | ✅ Done | 2026-09-14 | `a30018a`, tag `v0-local-baseline` |
 | Phase 1 — AWS account foundation | ✅ Done (2 items deferred ~24h) | 2026-09-14 → 15 | `ea7ab1b`, `389d384` |
-| Phase 2 — Files to Amazon S3 | 🔄 In progress (day 2 of 4 done) | 2026-09-26 → ~30 | see below |
+| Phase 2 — Files to Amazon S3 | 🔄 In progress (day 3 of 4 done) | 2026-09-26 → 30 | see below |
 
 ---
 
@@ -249,7 +249,7 @@ Exam topic: `EX-1.1-S01` root best practices; root-only tasks.
 
 ---
 
-## Phase 2 — Files to Amazon S3 (2026-09-26 → 29)
+## Phase 2 — Files to Amazon S3 (2026-09-26 → 30)
 
 **What the phase is.** Move the one stateful thing Phase 0 found — bytes on the laptop's disk — into a
 private, encrypted, versioned S3 bucket, and change the API so it brokers access with presigned URLs
@@ -354,3 +354,45 @@ Exam topic: D1 Task 1.2 · `EX-1.2-K04` secure application access (presigned URL
 - **Explain-it-back** (*Sandeep*, all three essentially right; notes recorded): (1) credentials come from the **default credentials provider chain** — `AWS_PROFILE` only *names* the profile; the profile's SSO session token (cached by `aws sso login`) is exchanged for short-lived role credentials, which is why the URL carries a security token and dies with the session; on EC2 the chain ends at the **instance profile** via IMDS. (2) A presigned URL does **not** bypass IAM: it runs as the signer, inside all four gates, and only until it expires. (3) The API never sees the bytes, so it cannot enforce a size limit; only a presigned **POST** policy's `content-length-range` makes S3 do it.
 
 **Day 2 exit state:** the API on the laptop hands out presigned S3 URLs; bytes never touch it; 30 tests green with the default local adapter; the upload-confirmation gap is visible and deliberate. Bucket left with only `documents/hello.txt` (smoke-test object and its delete marker removed). **Next (day 3): P2.S2.8** temporary confirm endpoint, **P2.S2.3** presign unit test + opt-in integration test + `.http` walkthrough against S3.
+
+### Day 3 (2026-09-29) — close the gap, test without Docker: P2.S2.8 + P2.S2.3
+
+```
+ Client ──1 POST /documents ──────▶ API ── row PENDING_UPLOAD
+   │──2 PUT bytes ──────────────────────────▶ S3 (presigned)
+   │──3 POST /documents/{id}/uploaded ─▶ API ── sizeOf() = HeadObject ──▶ S3
+   │                                         none → 409 · > 10 MB → delete + FAILED · else UPLOADED
+   │◀── 200 + downloadUrl ─────────────┘     (the client decides WHEN; storage decides WHAT)
+```
+
+**P2.S2.8-REF — Temporary confirm endpoint** — *Claude* (interface, service, controller, errors, `.http`) · *Sandeep* (`sizeOf()` on S3, size decision, walkthroughs, oversized-upload demo)
+Exam topic: D2 Task 2.1 · `EX-2.1-K05` event-driven architectures · `EX-2.1-S03` loose coupling — "does not trust the client".
+- `DocumentStorage.sizeOf(key)` → `Optional<Long>`. Local: the file's length. **S3: written by Sandeep** — one `HeadObject`, `contentLength()` on success, empty only on `NoSuchKeyException`, anything else propagates (so an `AccessDenied` is never reported as "not uploaded yet"). Its Javadoc's claim that `HeadObject` needs no `kms:Decrypt` is to be verified in Phase 5.
+- `POST /documents/{id}/uploaded`: owner-scoped; state must be `PENDING_UPLOAD`/`UPLOADED` else `409`; no bytes → `409` (`UploadNotFoundException`); size > `documents.max-file-size` (**10 MB**) → delete + `markRejected` (`FAILED`, file size cleared, no download URL); else `markUploaded(size)` with *storage's* size.
+- Local `PUT /content` enforces the same limit → `413`. Confirm is idempotent locally, so **one client flow** serves both adapters.
+- `http/documents.http` rewritten for both storages (environments `local`, `s3`), with a "confirm before upload → 409" check.
+
+**P2.S2.3 — Test the S3 adapter without Docker** — *Claude* (tests) · *Sandeep* (ran them)
+Exam topic: D1 Task 1.2 · `EX-1.2-K01` credentials security (no real credential in any test) · "an emulator proves wiring, not AWS behaviour".
+- `S3DocumentStorageTest` (offline, fake static credentials passed explicitly): bucket host, `documents/` prefix, `X-Amz-Expires=900`, `content-type` signed on uploads, only `host` signed on downloads, TTL from configuration.
+- `DocumentServiceTest` +4 confirm cases (success, no bytes, oversized, wrong state); end-to-end test gains the confirm step and a confirm-before-upload `409`.
+- `S3DocumentStorageIntegrationTest` (real bucket, `test/<run-id>/`, deletes every version and marker; `@EnabledIfEnvironmentVariable DOCAPI_S3_IT=true`).
+
+| # | Run | Result |
+|---|---|---|
+| 1 | `./mvnw verify` | 38 tests green, integration test **skipped** |
+| 2 | `DOCAPI_S3_IT=true ./mvnw verify` | green; integration test `Tests run: 1, Skipped: 0` against the real bucket |
+| 3 | versions under `test/` | none — the test cleaned up after itself |
+| 4 | after `aws sso logout` | integration test fails on credentials — what a test with no AWS access looks like |
+| 7a | `.http` Run All, env `s3` | all green; upload/download via presigned S3 URLs |
+| 7b | `.http` Run All, env `local` | all green; same file, URLs point at the API |
+| 7c | 11,000,000-byte upload | S3 `200` → confirm `FAILED` "file exceeds 10485760 bytes" → listing shows a **noncurrent 11 MB version under a delete marker** |
+
+- **Gotchas met:** a command copied from a rendered Markdown preview carried curly quotes, which Bash doesn't treat as quotes (`Unknown token “`) — copy from the source view; the native Windows `aws.exe` cannot read Git Bash's `/tmp` in `file://` paths.
+- **Every S3 delete leaves residue on a versioned bucket:** the six `.http` runs left six noncurrent 67-byte versions plus delete markers — the same shape as the rejected 11 MB file, and exactly what tomorrow's lifecycle rule expires automatically.
+
+**Explain-it-back** (*Sandeep*): (1) excellent — verifies existence and size via `HeadObject`; a client can still never confirm, upload big and never confirm, **overwrite after confirming within the URL's TTL** (only Phase 9's events close this), send mislabelled bytes, leak the URL, or confirm too early (`409`, retry). (2) *answered by Claude*: skipped by default because it needs a live SSO session, the network and a real bucket, while the default build must run offline anywhere; LocalStack would let it run every build but proves only wiring — never IAM, the bucket policy, SSE-KMS's TLS rule, real presign expiry or event-destination validation. (3) correct — the delete is a marker; the bytes live on as a noncurrent version until the lifecycle rule's `NoncurrentVersionExpiration`.
+
+**Close-out** — *Claude*: bucket back to `documents/hello.txt` (14 versions and markers removed with one `delete-objects`), local database emptied; ADR 14; README (confirm endpoint row, how to run the S3 tests).
+
+**Day 3 exit state:** the gap is closed (temporarily, verified not trusted); size enforced after the fact and its cost made visible; S3 adapter tested three ways with no Docker. **Next (day 4): P2.S2.5** lifecycle + storage classes, **P2.S2.6** conditional write, **P2.S2.7** S3 → SQS event proof, then the Phase 2 checkpoint.

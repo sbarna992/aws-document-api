@@ -100,6 +100,13 @@ public class Document implements Persistable<UUID> {
         this.failureReason = reason;
     }
 
+    /** The uploaded bytes were refused and deleted (e.g. too large): FAILED, and no content to serve. */
+    public void markRejected(String reason) {
+        markFailed(reason);
+        this.fileSize = null;
+        this.checksumSha256 = null;
+    }
+
     @Override
     public boolean isNew() {
         return isNew;

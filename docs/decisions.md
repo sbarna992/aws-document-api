@@ -172,6 +172,7 @@ the as-built API is ready to move and records what each later phase will change.
   layered JAR (`java -Djarmode=tools -jar app.jar extract --layers` in Boot 4 — confirm syntax);
   needs a Docker daemon; pin base image digest and `arm64` to match Graviton; set the JVM's
   container memory limit explicitly. Post-exam (decision D1).
+- *(Superseded in detail by ADR 14.)*
 - **Testing S3 without Docker:** Testcontainers 2.x + LocalStack are unavailable here and would not
   prove IAM, KMS, bucket policies, or event delivery anyway. Phase 2 uses (a) an opt-in integration
   test against the real bucket under a `test/` prefix and (b) an offline unit test of presigned-URL
@@ -264,3 +265,48 @@ pass through it.
 
 **Revisited in.** P2.S2.8 (confirm endpoint), Phase 9 (events, prefix stripping), Phase 4 (instance
 role exercises the KMS gate for real).
+
+## 14. Temporary confirm endpoint; S3 testing without Docker (Phase 2, P2.S2.8 + P2.S2.3, 2026-09-29)
+
+**Context.** With presigned PUTs (ADR 13) the bytes go straight to S3 and nothing tells the API they
+arrived: the row stays `PENDING_UPLOAD` and no download URL is ever issued. Separately, the S3 adapter
+needs automated tests on a machine with no Docker, so Testcontainers + LocalStack are unavailable.
+
+**Decisions.**
+
+- **`POST /documents/{id}/uploaded` — scaffolding, removed in Phase 9.** The client says "my upload
+  finished"; the API **verifies, it does not trust**: it asks storage for the object's size
+  (`DocumentStorage.sizeOf`, a `HeadObject` on S3), refuses with `409` if there are no bytes, and only
+  then moves the row to `UPLOADED` with *storage's* size. The client controls *when* the check runs,
+  never *what* it finds. Phase 9 replaces it with an S3 `ObjectCreated` event, which needs no client
+  at all and also fires on a second PUT to a still-valid URL (a gap this endpoint cannot close).
+- **Maximum size 10 MB** (`documents.max-file-size`, `DOCAPI_MAX_FILE_SIZE`). On S3 it is enforced
+  *after the fact* by the confirm step (ADR 13, C): an oversized object is deleted and the document
+  becomes `FAILED` with no file size (`markRejected`), so it never gets a download URL. On a versioned
+  bucket that delete is only a delete marker — the bytes stay stored and billed as a noncurrent
+  version until the lifecycle rule (P2.S2.5, `NoncurrentVersionExpiration`) removes them. Observed:
+  an 11,000,000-byte upload accepted by S3 (`200`), rejected at confirm, still present underneath its
+  delete marker. On the local adapter the API sees the bytes and refuses them directly (`413`).
+- **One client flow for both adapters.** Locally the confirm call is harmless and idempotent (the PUT
+  already marked the row `UPLOADED`; confirm re-reads the size), so `http/documents.http` and the
+  end-to-end test use create → PUT to `uploadUrl` → confirm for both storages.
+- **Testing without Docker:**
+  - *Offline unit test* (`S3DocumentStorageTest`): presigning is pure local computation, so URLs are
+    tested with deliberately fake static credentials and no network. The production beans pass no
+    credential and let the default provider chain decide — the contrast is the lesson.
+  - *Opt-in integration test* (`S3DocumentStorageIntegrationTest`): the real bucket, as the SSO
+    session, under `test/<run-id>/` (outside `documents/`, so lifecycle and event filters ignore it);
+    removes every version and delete marker it creates. Runs only with `DOCAPI_S3_IT=true`, so the
+    default build stays offline, free and runnable without an AWS account.
+  - *LocalStack* is the post-exam option. It would let the integration test run on every build, but an
+    emulator proves **wiring, not AWS behaviour**: it could not have shown the IAM policy's `documents/*`
+    scope, the bucket policy's explicit deny, SSE-KMS's own TLS rule (`400 InvalidArgument`, ADR 13's
+    check 7), real presign expiry, or event-destination validation. Those are only proven against AWS.
+
+**Consequences.** Every create against S3 that is never confirmed leaves a `PENDING_UPLOAD` row and
+possibly an unreferenced object; nothing reaps them yet (Phase 9's event consumer and a sweep job are
+the fix). The `HeadObject`-needs-no-`kms:Decrypt` assumption in `sizeOf`'s Javadoc is to be verified
+in Phase 5's KMS negative test.
+
+**Revisited in.** P2.S2.5 (lifecycle expires the rejected bytes), Phase 5 (KMS negative test),
+Phase 9 (events replace the endpoint; prefix stripping; reaping unconfirmed uploads).

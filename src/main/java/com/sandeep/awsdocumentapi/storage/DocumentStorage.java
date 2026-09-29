@@ -30,6 +30,9 @@ public interface DocumentStorage {
 
     boolean exists(String storageKey);
 
+    /** The stored object's size in bytes, or empty if nothing is stored under the key. */
+    Optional<Long> sizeOf(String storageKey);
+
     /**
      * A URL the client can {@code PUT} the bytes to directly, bypassing the API — or empty if this
      * storage cannot hand out such URLs, in which case the API accepts the bytes itself.

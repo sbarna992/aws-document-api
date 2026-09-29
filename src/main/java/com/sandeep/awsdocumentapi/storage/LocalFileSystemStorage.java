@@ -81,6 +81,19 @@ public class LocalFileSystemStorage implements DocumentStorage {
         return Files.isRegularFile(resolve(storageKey));
     }
 
+    @Override
+    public Optional<Long> sizeOf(String storageKey) {
+        Path path = resolve(storageKey);
+        if (!Files.isRegularFile(path)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(Files.size(path));
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read size of " + storageKey, e);
+        }
+    }
+
     /** A directory cannot hand out URLs; the API accepts the bytes itself (PUT /documents/{id}/content). */
     @Override
     public Optional<URI> presignedUploadUrl(String storageKey, String contentType) {

@@ -34,6 +34,7 @@ real authentication; documents are always scoped to that owner.
 | `GET` | `/documents/{id}` | Metadata, plus a **download URL** once bytes exist | `200` |
 | `GET` | `/documents/{id}/content` | Download the bytes (the local download URL) | `200` |
 | `GET` | `/documents` | The caller's documents, newest first | `200` |
+| `POST` | `/documents/{id}/uploaded` | **Temporary (removed in Phase 9):** confirm an upload. The API checks storage for the bytes and their size — `409` if none, `FAILED` if over the 10 MB limit, else `UPLOADED` with a download URL | `200` |
 | `POST` | `/documents/{id}/process` | Start asynchronous processing (SHA-256 today) | `202` |
 | `DELETE` | `/documents/{id}` | Delete metadata and bytes | `204` |
 | `GET` | `/actuator/health` | Liveness, including the database | `200` |
@@ -142,6 +143,7 @@ spend by phase. Tag keys are case-sensitive. Untagged = missed on teardown day.
 
 | Runtime switch | `documents.storage.type=local` (default) keeps bytes in `./local-storage`; `documents.storage.type=s3` uses the bucket. With `s3`, `POST /documents` returns a **presigned PUT** URL and `GET /documents/{id}` a **presigned GET** URL (15-minute TTL, `DOCAPI_PRESIGN_TTL`); the API never touches bytes. The `Content-Type` declared at creation is a signed header. Neither SDK client is given a credential or Region — the default provider chains supply them (SSO profile on the laptop, instance role on EC2). See ADR 13. |
 | Running against S3 from IntelliJ | A second run configuration, *AwsDocumentApiApplication (S3)*, with environment variables `AWS_PROFILE=document-api`, `AWS_REGION=us-east-1`, `DOCAPI_STORAGE_TYPE=s3`, `DOCAPI_BUCKET=docapi-documents-7fb3fd47`. Run `aws sso login --profile document-api` first. `scripts/s3-smoke.sh` exercises the presigned flow end to end and prints the expected result before each check. |
+| Tests against S3 | `./mvnw verify` runs offline: the presigned-URL test uses fake credentials and the real-bucket integration test is skipped. To run it: `aws sso login --profile document-api`, then `DOCAPI_S3_IT=true ./mvnw verify` — it works under `test/<run-id>/` and deletes every version it creates. `http/documents.http` has environments `local` and `s3` for the two run configurations. |
 
 The four gates every request passes: Block Public Access → bucket policy → identity policy → KMS key
 policy. An explicit deny anywhere wins; within one account either the identity or the resource policy

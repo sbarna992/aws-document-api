@@ -24,6 +24,7 @@ public class DocumentService {
     private final DocumentRepository repository;
     private final DocumentStorage storage;
     private final ApplicationEventPublisher events;
+    private final DocumentLimits limits;
 
     /** A document's bytes together with the metadata needed to serve them. */
     public record DocumentContent(Document document, Resource resource) {
@@ -75,8 +76,45 @@ public class DocumentService {
         }
 
         long size = storage.store(document.getStorageKey(), content);
+        long max = limits.maxFileSize().toBytes();
+        if (size > max) {
+            storage.delete(document.getStorageKey());
+            throw new FileTooLargeException(id, size, max);
+        }
         document.markUploaded(size);
         log.info("Stored {} bytes for document {}", size, id);
+        return repository.save(document);
+    }
+
+    /**
+     * TEMPORARY (P2.S2.8, removed in Phase 9): the client says "my upload finished". The API does not
+     * believe it — it asks storage whether the bytes really exist and how big they are, and only then
+     * moves the row on. The client can delay the transition, never fake it. Phase 9 replaces this with
+     * an S3 ObjectCreated event that needs no client at all.
+     * <p>
+     * Size is enforced here, after the fact (presigned PUT cannot make S3 refuse it — ADR 13, C): an
+     * oversized object is deleted and the document marked FAILED. On a versioned bucket that delete is a
+     * delete marker; the bytes stay billable until the lifecycle rule expires the noncurrent version.
+     */
+    @Transactional
+    public Document confirmUpload(String ownerId, UUID id) {
+        Document document = get(ownerId, id);
+        DocumentStatus status = document.getStatus();
+        if (status != DocumentStatus.PENDING_UPLOAD && status != DocumentStatus.UPLOADED) {
+            throw new InvalidDocumentStateException(id, status, "confirm an upload");
+        }
+
+        long size = storage.sizeOf(document.getStorageKey())
+                .orElseThrow(() -> new UploadNotFoundException(id));
+        long max = limits.maxFileSize().toBytes();
+        if (size > max) {
+            storage.delete(document.getStorageKey());
+            document.markRejected("file exceeds " + max + " bytes (was " + size + ")");
+            log.warn("Rejected document {}: {} bytes exceeds the {}-byte limit", id, size, max);
+        } else {
+            document.markUploaded(size);
+            log.info("Confirmed upload of {} bytes for document {}", size, id);
+        }
         return repository.save(document);
     }
 

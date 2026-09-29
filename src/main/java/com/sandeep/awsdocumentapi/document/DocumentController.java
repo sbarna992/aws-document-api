@@ -59,6 +59,16 @@ public class DocumentController {
         return DocumentResponse.from(service.storeContent(ownerId, id, body));
     }
 
+    /**
+     * TEMPORARY (P2.S2.8, removed in Phase 9): "my upload to the upload URL finished". The API verifies
+     * it against storage before believing it. Returns the same body as GET /documents/{id}.
+     */
+    @PostMapping("/{id}/uploaded")
+    public DocumentDetailResponse confirmUpload(@RequestHeader(OWNER_HEADER) String ownerId, @PathVariable UUID id) {
+        Document document = service.confirmUpload(ownerId, id);
+        return new DocumentDetailResponse(DocumentResponse.from(document), downloadUrlFor(document));
+    }
+
     @GetMapping
     public List<DocumentResponse> list(@RequestHeader(OWNER_HEADER) String ownerId) {
         return service.list(ownerId).stream().map(DocumentResponse::from).toList();
@@ -67,11 +77,17 @@ public class DocumentController {
     @GetMapping("/{id}")
     public DocumentDetailResponse get(@RequestHeader(OWNER_HEADER) String ownerId, @PathVariable UUID id) {
         Document document = service.get(ownerId, id);
-        URI downloadUrl = document.getStatus() == DocumentStatus.PENDING_UPLOAD
-                ? null
-                : service.downloadUrl(document)
-                        .orElseGet(() -> currentRequest().path("/content").build().toUri());
-        return new DocumentDetailResponse(DocumentResponse.from(document), downloadUrl);
+        return new DocumentDetailResponse(DocumentResponse.from(document), downloadUrlFor(document));
+    }
+
+    /** Null until bytes exist (and never for a FAILED upload); a presigned GET on S3, else the API's own endpoint. */
+    private URI downloadUrlFor(Document document) {
+        DocumentStatus status = document.getStatus();
+        if (status == DocumentStatus.PENDING_UPLOAD || (status == DocumentStatus.FAILED && document.getFileSize() == null)) {
+            return null;
+        }
+        return service.downloadUrl(document).orElseGet(() -> ServletUriComponentsBuilder.fromCurrentContextPath()
+                .path("/documents/{id}/content").buildAndExpand(document.getId()).toUri());
     }
 
     @GetMapping("/{id}/content")

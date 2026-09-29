@@ -1,7 +1,9 @@
 package com.sandeep.awsdocumentapi.web;
 
 import com.sandeep.awsdocumentapi.document.DocumentNotFoundException;
+import com.sandeep.awsdocumentapi.document.FileTooLargeException;
 import com.sandeep.awsdocumentapi.document.InvalidDocumentStateException;
+import com.sandeep.awsdocumentapi.document.UploadNotFoundException;
 import com.sandeep.awsdocumentapi.storage.StoredObjectNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
@@ -40,6 +42,17 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(InvalidDocumentStateException.class)
     ProblemDetail invalidDocumentState(InvalidDocumentStateException ex) {
         return problem(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    /** Confirm called before the bytes reached storage: a state conflict, not a missing resource. */
+    @ExceptionHandler(UploadNotFoundException.class)
+    ProblemDetail uploadNotFound(UploadNotFoundException ex) {
+        return problem(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    @ExceptionHandler(FileTooLargeException.class)
+    ProblemDetail fileTooLarge(FileTooLargeException ex) {
+        return problem(HttpStatus.CONTENT_TOO_LARGE, ex.getMessage());
     }
 
     /** Metadata says the bytes exist but storage disagrees: a broken invariant on our side, not a client mistake. */

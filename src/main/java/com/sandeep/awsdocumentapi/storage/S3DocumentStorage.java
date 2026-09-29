@@ -139,6 +139,44 @@ public class S3DocumentStorage implements DocumentStorage {
     }
 
     /**
+     * Asks S3 how many bytes are stored under the key — the server-side answer to a client's claim
+     * that its upload to the presigned URL finished.
+     * <p>
+     * The confirm step ({@code POST /documents/{id}/uploaded}) trusts the client only for <em>when</em>
+     * to look, never for <em>what</em> is there: it calls this method, enforces the maximum size on the
+     * returned length, and only then moves the row to {@code UPLOADED} with this value as its
+     * {@code file_size}. The client's own statement of the size is never used.
+     * <p>
+     * Implemented with {@code HeadObject}: metadata only, no body is transferred, and it is authorized
+     * by {@code s3:GetObject}.
+     * The result describes the <em>current</em> version: on this versioned bucket a later PUT to the
+     * same key creates a new version with its own size, so the value is a snapshot at confirm time,
+     * not a guarantee about the bytes processing will later read.
+     *
+     * @param storageKey the database storage key (without the S3 prefix; {@link #objectKey} adds it)
+     * @return the object's size in bytes, or {@link Optional#empty()} if nothing is stored under the key
+     *         (S3 answered 404, surfaced by the SDK as {@link NoSuchKeyException}) — i.e. the upload has
+     *         not happened, has not finished, or failed
+     * @throws software.amazon.awssdk.services.s3.model.S3Exception for any other S3 error — notably
+     *         {@code AccessDenied} (403), which must propagate rather than be reported as "not uploaded
+     *         yet"; the caller would otherwise answer 409 to what is really a permissions fault
+     * @throws software.amazon.awssdk.core.exception.SdkClientException if S3 could not be reached
+     *         (network, credentials, Region)
+     */
+    @Override
+    public Optional<Long> sizeOf(String storageKey) {
+        try {
+            return Optional.of(s3.headObject(HeadObjectRequest.builder()
+                    .bucket(props.bucket())
+                    .key(objectKey(storageKey))
+                    .build()).contentLength());
+        } catch (NoSuchKeyException e) {
+            return Optional.empty();
+        }
+    }
+
+
+    /**
      * The content type is set on the request being signed, which makes it a signed header: the client
      * must send exactly that value or S3 rejects the signature ({@code SignatureDoesNotMatch}).
      */

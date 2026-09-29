@@ -87,6 +87,8 @@ class DocumentApiEndToEndTest {
                 .exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT);
         client.post().uri("/documents/{id}/process", id).header(OWNER_HEADER, owner)
                 .exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT);
+        client.post().uri("/documents/{id}/uploaded", id).header(OWNER_HEADER, owner)
+                .exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT); // "confirmed" before any bytes: refused
 
         // 3. Upload to exactly the URL we were given
         client.put().uri(created.uploadUrl())
@@ -100,6 +102,18 @@ class DocumentApiEndToEndTest {
                     assertThat(response.fileSize()).isEqualTo(content.length);
                 });
         assertThat(storageRoot).isDirectoryContaining(path -> path.getFileName().toString().startsWith(id.toString()));
+
+        // 3b. Confirm (P2.S2.8): the same client flow as on S3. Locally it is idempotent — the PUT already
+        //     marked the row UPLOADED — and the API re-reads the size from storage rather than trusting us.
+        client.post().uri("/documents/{id}/uploaded", id).header(OWNER_HEADER, owner)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(DocumentDetailResponse.class)
+                .value(response -> {
+                    assertThat(response.document().status()).isEqualTo(DocumentStatus.UPLOADED);
+                    assertThat(response.document().fileSize()).isEqualTo(content.length);
+                    assertThat(response.downloadUrl()).isNotNull();
+                });
 
         // 4. Metadata now carries a download URL, and it serves the same bytes back
         DocumentDetailResponse detail = getDocument(id);
