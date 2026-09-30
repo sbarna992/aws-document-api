@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowDocumentBucketEvents",
+      "Effect": "Allow",
+      "Principal": { "Service": "s3.amazonaws.com" },
+      "Action": "sqs:SendMessage",
+      "Resource": "arn:aws:sqs:us-east-1:234178676885:docapi-s3-events-test",
+      "Condition": {
+        "ArnEquals":    { "aws:SourceArn": "arn:aws:s3:::docapi-documents-7fb3fd47" },
+        "StringEquals": { "aws:SourceAccount": "234178676885" }
+      }
+    }
+  ]
+}

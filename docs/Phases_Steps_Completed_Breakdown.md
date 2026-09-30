@@ -5,14 +5,15 @@ working day. Step IDs (`P1.S1.2` etc.) and exam-topic mappings follow
 `SAA-C03_Replatforming_Roadmap_Final_Document.md`. "Who" = **Sandeep** (console / manual work) or
 **Claude** (code, CLI, documentation).*
 
-*Last updated: 2026-09-29. Exam: to be rescheduled (was 2026-10-31); the calendar shifted +9 days after Sep 16–25 were lost.*
+*Last updated: 2026-09-30. Exam: to be rescheduled (was 2026-10-31); the calendar shifted +9 days after Sep 16–25 were lost.*
 
 | Phase | Status | Dates | Commits |
 |---|---|---|---|
 | Local build (legacy Stages 1–2) | ✅ Done | 2026-09-02 | `4516aaa` … `02ff2c2` (7 commits) |
 | Phase 0 — Readiness check | ✅ Done | 2026-09-14 | `a30018a`, tag `v0-local-baseline` |
 | Phase 1 — AWS account foundation | ✅ Done (2 items deferred ~24h) | 2026-09-14 → 15 | `ea7ab1b`, `389d384` |
-| Phase 2 — Files to Amazon S3 | 🔄 In progress (day 3 of 4 done) | 2026-09-26 → 30 | see below |
+| Phase 2 — Files to Amazon S3 | ✅ Done | 2026-09-26 → 30 | `889ec98` … (day 4) |
+| Phase 3 — Metadata to Amazon RDS PostgreSQL | ⏳ Next | from 2026-10-01 | — |
 
 ---
 
@@ -396,3 +397,53 @@ Exam topic: D1 Task 1.2 · `EX-1.2-K01` credentials security (no real credential
 **Close-out** — *Claude*: bucket back to `documents/hello.txt` (14 versions and markers removed with one `delete-objects`), local database emptied; ADR 14; README (confirm endpoint row, how to run the S3 tests).
 
 **Day 3 exit state:** the gap is closed (temporarily, verified not trusted); size enforced after the fact and its cost made visible; S3 adapter tested three ways with no Docker. **Next (day 4): P2.S2.5** lifecycle + storage classes, **P2.S2.6** conditional write, **P2.S2.7** S3 → SQS event proof, then the Phase 2 checkpoint.
+
+### Day 4 (2026-09-30) — the S3 feature tour: P2.S2.5, P2.S2.6, P2.S2.7 + Phase 2 checkpoint
+
+```
+ S2.5  documents/…  ──30 d──▶ STANDARD_IA ──90 d──▶ GLACIER_IR       noncurrent ──7 d──▶ gone; lone markers removed
+ S2.6  PUT If-None-Match: *   first ──▶ 200 + version      second ──▶ 412 PreconditionFailed (still one version)
+ S2.7  PUT documents/x ──▶ S3 ──ObjectCreated──▶ SQS ──▶ {"event":"ObjectCreated:Put","key":"documents/event-demo.txt"}
+                             ▲ fails ("Unable to validate…") until the QUEUE's policy lets s3.amazonaws.com send
+```
+
+**P2.S2.5 — Lifecycle rule and storage classes** — *Sandeep* (wrote and applied the rule, the storage-class demo, the decision) · *Claude* (review; suggested the delete-marker cleanup)
+Exam topic: D4 Task 4.1 · `EX-4.1-K07/K09/K10` lifecycles, access patterns, tiering · `EX-4.1-S05/S08/S09/S10` · D1 `EX-1.3-K03` retention.
+- `infra/s3/lifecycle.json`, rule `documents-tiering-and-hygiene` on `documents/`: Standard-IA at 30 d, Glacier IR at 90 d, `NoncurrentVersionExpiration` 7 d, `AbortIncompleteMultipartUpload` 3 d, plus `ExpiredObjectDeleteMarker: true` so the delete markers left behind (Day 3's residue shape) are removed too.
+- Read-back showed a field nobody wrote: **`TransitionDefaultMinimumObjectSize: all_storage_classes_128K`** — objects under 128 KB are never transitioned (cheaper to leave them). Live rule verified byte-for-byte equal to the repo file.
+- Demo: an object put straight into `STANDARD_IA` by hand (`head-object` → `STANDARD_IA`, still `aws:kms`) — allowed, but billed as 128 KB for 30 days.
+- Sandeep's decision, recorded in ADR 15: 30 d because documents are read right after upload (and 30 d is S3's minimum before an IA transition); Standard-IA then Glacier IR because both return in **milliseconds** while storage gets cheaper; 7 d for noncurrent versions to stop paying for superseded data (and as the recovery window); never Deep Archive — hours to restore.
+
+**P2.S2.6 — Conditional write and overwrite policy** — *Sandeep*
+Exam topic: D2 `EX-2.2-K05` idempotency / optimistic concurrency · D3 `EX-3.1-K02` S3 strong consistency.
+- `put-object --if-none-match "*"` twice: **first → version `_QH5…`; second → `412 PreconditionFailed`; one version stored.** Prediction correct. *Versioning records a concurrent overwrite; a precondition prevents it.*
+- Policy (ADR 15): the API does not use `If-None-Match` — re-uploads are intended and recoverable for 7 days. Side notes: uploads now carry a default `CRC64NVME` integrity checksum; an SSE-KMS object's ETag is not its MD5.
+
+**P2.S2.7 — S3 event delivery proved, then torn down** — *Sandeep* (queue, notification, **wrote the queue policy**, read the event, teardown) · *Claude* (templates, explanation)
+Exam topic: D2 Task 2.1 · `EX-2.1-K05/K11` event-driven, queuing · `EX-1.1-S05` resource policies with a service principal · D3 `EX-3.5-K02` ingestion.
+- First attempt, deliberately without a queue policy → **`InvalidArgument — Unable to validate the following destination configurations`**: S3 test-delivers when the configuration is saved, the queue refused, nothing was saved.
+- `infra/sqs/s3-events-queue-policy.json`: `Principal {"Service":"s3.amazonaws.com"}`, only `sqs:SendMessage`, conditions `aws:SourceArn` = the bucket and `aws:SourceAccount` = the account (confused-deputy guard). Attached via `jq -c '{Policy: tojson}'` (SQS wants the policy as an escaped string).
+- Second attempt saved; an upload produced `{"event":"ObjectCreated:Put","key":"documents/event-demo.txt","size":4}`. The key **includes `documents/`** — Phase 9's consumer strips it (ADR 13 A). The `s3:TestEvent` stayed in the queue (standard queues return a sample per receive).
+- Teardown: notification configuration set to `{}` *before* deleting the queue; queue deleted; both verified empty.
+
+**Phase 2 exam checkpoint** — *Sandeep* (answers) · *Claude* (marking)
+- Strong: storage-service choice (S3/EFS/EBS/FSx/Storage Gateway), the four gates, encryption options, the storage-class map, versioning vs Object Lock vs replication.
+- Corrected: the bonus meant check 7's `400` (S3's own SSE-KMS-requires-TLS validation, before any gate), not today's notification error; how to tell the gates apart from the `AccessDenied` message text; a presigned PUT also pins its **signed headers** and has no size condition at all.
+- To revisit: **event destinations** — pick by requirement (SQS buffer, SNS fan-out, Lambda code, EventBridge routing/replay), principal written in full, and EventBridge's targets still need their own policies; **the ten recognize-it cards** — one cue per card (table kept in the chat notes; reread the Final Document's Phase 2 checkpoint).
+
+**Close-out** — *Claude*: demo objects removed (all versions); bucket back to `documents/hello.txt`, now with bucket policy **and** lifecycle rule; no queue, no notification; ADR 15; cleanup ledger (lifecycle row; queue row created-and-deleted); README lifecycle row.
+
+### ✅ Phase 2 closed (2026-09-30)
+
+| Exit criterion | Evidence |
+|---|---|
+| Private, SSE-KMS-encrypted, versioned bucket with Block Public Access | Day 1 verification |
+| `S3DocumentStorage` behind the existing interface; tests green with the local adapter | Day 2; 38 tests, integration test opt-in |
+| Presigned PUT/GET; full walkthrough against the real bucket | Day 2 smoke script, Day 3 `.http` (`s3` env) |
+| Upload-confirmation gap closed by a temporary endpoint | Day 3, `POST /documents/{id}/uploaded` (verify, don't trust) |
+| Least-privilege policy verified in the simulator | Day 1, 9 CLI simulations + UI |
+| Lifecycle rule with transitions; storage-class decision written | Day 4, ADR 15 |
+| One `ObjectCreated` event observed in a queue | Day 4 |
+| `docs/cleanup.md` rows added | 6 Phase 2 rows |
+
+**Carried forward:** reap unconfirmed uploads and replace the confirm endpoint with events (Phase 9); verify `HeadObject` needs no `kms:Decrypt` (Phase 5); attach `DocumentApiS3Access` to the instance role (Phase 4). **Next: Phase 3 — metadata to Amazon RDS for PostgreSQL.**

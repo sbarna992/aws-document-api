@@ -310,3 +310,47 @@ in Phase 5's KMS negative test.
 
 **Revisited in.** P2.S2.5 (lifecycle expires the rejected bytes), Phase 5 (KMS negative test),
 Phase 9 (events replace the endpoint; prefix stripping; reaping unconfirmed uploads).
+
+## 15. Lifecycle, overwrite policy, and S3 event delivery proven (Phase 2, P2.S2.5–S2.7, 2026-09-30)
+
+**Lifecycle rule** `documents-tiering-and-hygiene` ([`infra/s3/lifecycle.json`](../infra/s3/lifecycle.json)),
+filter prefix `documents/` only:
+
+| Action | Setting | Why (Sandeep's reasoning, with notes) |
+|---|---|---|
+| Transition → `STANDARD_IA` | 30 days | Documents are downloaded often right after upload and rarely later. 30 days is also the minimum S3 allows before a transition to Standard-IA or One Zone-IA. |
+| Transition → `GLACIER_IR` | 90 days | Rarely read, but a user who asks must get the file in **milliseconds**; each step trades lower storage price for a higher retrieval fee and a longer minimum charge (30 d, then 90 d). |
+| `NoncurrentVersionExpiration` | 7 days | Superseded and deleted versions stop billing a week after they stop being current — and 7 days is also the **recovery window** for an accidental overwrite or delete. This is what removes a rejected oversized upload (ADR 14). |
+| `Expiration.ExpiredObjectDeleteMarker` | true | Once a key's noncurrent versions are gone, its delete marker is left alone with nothing under it; this removes it. Cannot be combined with `Expiration.Days` in the same rule (we never expire current documents). |
+| `AbortIncompleteMultipartUpload` | 3 days | Parts of uploads nobody finished stop billing. |
+| *(never)* Deep Archive | — | Hours to restore (and a presigned GET on an archived object fails with `InvalidObjectState` until someone restores it), plus a 180-day minimum — incompatible with serving documents on demand. |
+
+S3 added `TransitionDefaultMinimumObjectSize: all_storage_classes_128K` on its own: objects under 128 KB
+are never transitioned (Standard-IA bills a 128 KB minimum plus retrieval fees, so moving small objects
+would cost more). Lifecycle runs asynchronously, once a day; the proof is the configuration.
+
+**Overwrite policy.** Keys are `<uuid>-<filename>`, unique per document. A re-upload of the *same*
+document is intended (`UPLOADED → UPLOADED`) and recoverable through versioning for 7 days, so the
+presigned PUT does **not** carry `If-None-Match`. Demonstrated: `put-object --if-none-match "*"` twice →
+first succeeds, second `412 PreconditionFailed`, exactly one version stored. *Versioning records a
+concurrent overwrite; a precondition prevents it.* `If-Match: <etag>` is the compare-and-swap variant;
+Phase 11 uses the same idea as a DynamoDB conditional write. (The ETag of an SSE-KMS object is not the
+MD5 of its content, so it is not a content checksum.)
+
+**Event delivery proven, then torn down.** Temporary queue `docapi-s3-events-test`,
+`s3:ObjectCreated:*` on prefix `documents/`. Two lessons:
+
+- Saving a notification configuration makes S3 **test-deliver** to the destination. With no queue
+  policy the save failed: `InvalidArgument — Unable to validate the following destination
+  configurations`. Fixed by a **resource-based policy on the queue**
+  ([`infra/sqs/s3-events-queue-policy.json`](../infra/sqs/s3-events-queue-policy.json), written by
+  Sandeep): principal `{"Service": "s3.amazonaws.com"}`, only `sqs:SendMessage`, and conditions
+  `aws:SourceArn` = the bucket, `aws:SourceAccount` = this account (the confused-deputy guard).
+- A bucket has **one** notification configuration; `put-bucket-notification-configuration` replaces it.
+  Phase 9 must merge, not overwrite. Clear the configuration *before* deleting its queue.
+
+The event body carried `"key": "documents/event-demo.txt"` — **with** the prefix, confirming ADR 13's
+note that the Phase 9 consumer must strip `documents/` before looking up the row.
+
+**Revisited in.** Phase 9 (real queue + DLQ, the worker, the policy shape reused), Phase C (storage
+economics priced), Phase 11 (conditional writes in DynamoDB).
