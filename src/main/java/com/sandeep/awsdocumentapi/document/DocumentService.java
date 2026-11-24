@@ -1,5 +1,8 @@
 package com.sandeep.awsdocumentapi.document;
 
+import com.sandeep.awsdocumentapi.analysis.DocumentAnalysis;
+import com.sandeep.awsdocumentapi.analysis.DocumentAnalyzer;
+import com.sandeep.awsdocumentapi.analysis.UnsupportedDocumentTypeException;
 import com.sandeep.awsdocumentapi.processing.DocumentProcessingRequested;
 import com.sandeep.awsdocumentapi.storage.DocumentStorage;
 import com.sandeep.awsdocumentapi.storage.StorageKeys;
@@ -7,10 +10,13 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.core.io.Resource;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.util.List;
 import java.util.Optional;
@@ -25,6 +31,7 @@ public class DocumentService {
     private final DocumentStorage storage;
     private final ApplicationEventPublisher events;
     private final DocumentLimits limits;
+    private final DocumentAnalyzer analyzer;
 
     /** A document's bytes together with the metadata needed to serve them. */
     public record DocumentContent(Document document, Resource resource) {
@@ -124,6 +131,37 @@ public class DocumentService {
             throw new InvalidDocumentStateException(id, document.getStatus(), "be downloaded");
         }
         return new DocumentContent(document, storage.load(document.getStorageKey()));
+    }
+
+    /**
+     * Sends the document to the configured {@link DocumentAnalyzer} (Claude, ADR 16) and returns its findings.
+     * Nothing is stored: every call is a fresh, billed analysis.
+     * <p>
+     * Deliberately not transactional, like {@link #storeContent}: an LLM call can take tens of seconds and
+     * must not hold a database connection while it runs. Ownership is checked before any byte leaves the API.
+     */
+    public DocumentAnalysis analyze(String ownerId, UUID id) {
+        Document document = get(ownerId, id);
+        DocumentStatus status = document.getStatus();
+        if (status == DocumentStatus.PENDING_UPLOAD || (status == DocumentStatus.FAILED && document.getFileSize() == null)) {
+            throw new InvalidDocumentStateException(id, status, "be analysed");
+        }
+        MediaType contentType = MediaType.parseMediaType(document.getContentType());
+        if (!DocumentAnalyzer.supports(contentType)) {
+            throw new UnsupportedDocumentTypeException(id, document.getContentType());
+        }
+
+        byte[] content = readAll(storage.load(document.getStorageKey()));
+        log.info("Analysis requested for document {} ({} bytes)", id, content.length);
+        return analyzer.analyze(document.getOriginalFilename(), contentType, content);
+    }
+
+    private static byte[] readAll(Resource resource) {
+        try (InputStream in = resource.getInputStream()) {
+            return in.readAllBytes();
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read document content", e);
+        }
     }
 
     /**

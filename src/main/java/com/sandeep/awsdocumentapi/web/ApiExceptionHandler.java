@@ -1,5 +1,8 @@
 package com.sandeep.awsdocumentapi.web;
 
+import com.sandeep.awsdocumentapi.analysis.AnalysisFailedException;
+import com.sandeep.awsdocumentapi.analysis.AnalysisUnavailableException;
+import com.sandeep.awsdocumentapi.analysis.UnsupportedDocumentTypeException;
 import com.sandeep.awsdocumentapi.document.DocumentNotFoundException;
 import com.sandeep.awsdocumentapi.document.FileTooLargeException;
 import com.sandeep.awsdocumentapi.document.InvalidDocumentStateException;
@@ -60,6 +63,23 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     ProblemDetail contentMissing(StoredObjectNotFoundException ex, HttpServletRequest request) {
         log.error("Stored content missing for {} {}", request.getMethod(), request.getRequestURI(), ex);
         return problem(HttpStatus.INTERNAL_SERVER_ERROR, "Document content is missing from storage");
+    }
+
+    @ExceptionHandler(UnsupportedDocumentTypeException.class)
+    ProblemDetail unsupportedDocumentType(UnsupportedDocumentTypeException ex) {
+        return problem(HttpStatus.UNSUPPORTED_MEDIA_TYPE, ex.getMessage());
+    }
+
+    /** Analysis switched off, or Claude rate-limited/overloaded after the SDK's retries: try again later. */
+    @ExceptionHandler(AnalysisUnavailableException.class)
+    ProblemDetail analysisUnavailable(AnalysisUnavailableException ex) {
+        return problem(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage());
+    }
+
+    /** Our upstream (Claude) refused or gave an unusable answer: not the caller's fault. Detail is logged where it happens. */
+    @ExceptionHandler(AnalysisFailedException.class)
+    ProblemDetail analysisFailed(AnalysisFailedException ex) {
+        return problem(HttpStatus.BAD_GATEWAY, ex.getMessage());
     }
 
     @Override

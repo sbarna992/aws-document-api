@@ -354,3 +354,61 @@ note that the Phase 9 consumer must strip `documents/` before looking up the row
 
 **Revisited in.** Phase 9 (real queue + DLQ, the worker, the policy shape reused), Phase C (storage
 economics priced), Phase 11 (conditional writes in DynamoDB).
+
+## 16. Document analysis through Claude's Messages API (side feature, outside the AWS phases, 2026-11-24)
+
+**Context.** Turn a stored document into structured, checkable data with an LLM — the pattern behind
+AI-assisted document review ("identify relevant findings, link them to the source"). It is not an AWS
+phase; it builds on the storage abstraction and the error model the phases already have.
+
+**Decisions.**
+
+- **`POST /documents/{id}/analysis`, synchronous, nothing stored.** `POST` because every call does new,
+  billed work whose answer can differ slightly; synchronous because one call takes 5–20 s, acceptable
+  for a first version; not stored so there is no schema change. Ownership (`404`), state (`409`) and
+  type (`415`, PDF and plain text only) are checked **before any byte leaves the API**. The service
+  method is not `@Transactional`, like `storeContent`: an LLM call must not hold a database connection.
+- **Structured output through a strict tool, not free text.** One tool, `record_document_analysis`,
+  whose input schema *is* the answer (`documentType`, `summary`, `findings[]` of
+  `{category, description, evidence, page}`), with `strict: true`, `additionalProperties: false` and
+  every field `required`, so the API guarantees the shape. The tool is never executed. Every finding
+  must quote its **evidence** and give its **page**, so a reader can check it against the source.
+  *Alternative:* structured outputs (`output_config.format`) constrain the whole reply without a tool and
+  would work equally well; the tool is the more transferable pattern — it is how agents call real tools.
+- **No forced `tool_choice`.** Current models (Claude Opus 5.5 and later) reject `tool_choice: tool/any`
+  with `400`. The request uses the default (`auto`) and the system prompt says to call the tool; the rare
+  answer without a tool call is handled like any other unusable reply.
+- **The reply is validated, never trusted.** Refusal (`stop_reason: refusal`), a reply cut off by
+  `max_tokens`, no tool call, a wrong shape or a finding without evidence → `AnalysisFailedException` →
+  **`502`**: our upstream failed, not the caller. Rate limits, 5xx and network failures — after the SDK's
+  own two retries — → `AnalysisUnavailableException` → **`503`**. A rejected key or request (`401`, `400`)
+  → `502` with the detail only in the log.
+- **Behind an interface, off by default.** `DocumentAnalyzer` (like `DocumentStorage`): the service never
+  sees Claude, tests use a mock, and another provider can replace it — notably **Claude on Amazon
+  Bedrock**, where the instance role replaces the API key and a VPC interface endpoint replaces the
+  internet path (needed anyway once the API runs in private subnets with no NAT, Phase 7).
+  `documents.analysis.enabled=false` by default: the app, the 54 offline tests and every clone run with
+  no key and no cost; the endpoint answers `503`.
+- **Model and settings are configuration.** `claude-opus-5-5`, effort `medium` (set explicitly — this
+  model's thinking cannot be switched off, effort is the control), `max_tokens` 16000, 2-minute timeout.
+  Anthropic Java SDK **3.13.0** (the 3.x names differ from older examples, e.g.
+  `addUserMessageOfContentBlockParams`); it brings Jackson 2, which coexists with Spring Boot 4's
+  Jackson 3 because the packages differ.
+- **The key is an environment variable only.** `AnthropicOkHttpClient.fromEnv()` reads
+  `ANTHROPIC_API_KEY`; no property, file or log ever holds it. A monthly spend limit is set in the
+  Claude Console.
+- **Refusal fallback deferred.** Anthropic's server-side fallback (retry a declined request on another
+  model) exists in this SDK only on the beta message types; adopting it would move the whole request to
+  beta classes. A refusal is a clean `502` for now.
+
+**Evidence.** Real call against the synthetic lab report (`src/test/resources/analysis/`, fictional data
+only): 8 findings in 14 s including both out-of-range values with page numbers, 4,885 input / 1,084
+output tokens (≈ 4¢); plain-text check 933 / 443 tokens (≈ 1¢).
+
+**Consequences.** Each call costs cents and is not cached — a repeated analysis is billed again. Document
+contents are sent to Anthropic, so only synthetic documents are used. Scanned PDFs work because Claude
+reads each page as an image as well as text.
+
+**Revisited in.** Later options: store results (Flyway V3, JSON column, an audit trail); make it
+asynchronous on the Phase 9 queue; Claude on Bedrock via a VPC endpoint (Phase 7); built-in citations;
+retrieval across a user's documents; an MCP server exposing the API's operations.

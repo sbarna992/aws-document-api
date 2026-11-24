@@ -30,6 +30,7 @@
         <java.version>25</java.version>
         <!-- Spring Boot does not manage the AWS SDK; the SDK's own BOM pins every module to one version. -->
         <aws.sdk.version>2.55.6</aws.sdk.version>
+        <anthropic.sdk.version>3.13.0</anthropic.sdk.version>
     </properties>
     <dependencyManagement>
         <dependencies>
@@ -56,6 +57,13 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ssooidc</artifactId>
+        </dependency>
+        <!-- Anthropic's official Java SDK for Claude's Messages API (document analysis). It reads
+             ANTHROPIC_API_KEY from the environment; the client is only created when analysis is enabled. -->
+        <dependency>
+            <groupId>com.anthropic</groupId>
+            <artifactId>anthropic-java</artifactId>
+            <version>${anthropic.sdk.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

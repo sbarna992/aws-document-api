@@ -5,7 +5,7 @@ working day. Step IDs (`P1.S1.2` etc.) and exam-topic mappings follow
 `SAA-C03_Replatforming_Roadmap_Final_Document.md`. "Who" = **Sandeep** (console / manual work) or
 **Claude** (code, CLI, documentation).*
 
-*Last updated: 2026-09-30. Exam: to be rescheduled (was 2026-10-31); the calendar shifted +9 days after Sep 16–25 were lost.*
+*Last updated: 2026-11-24. Exam: to be rescheduled (was 2026-10-31); the calendar shifted +9 days after Sep 16–25 were lost.*
 
 | Phase | Status | Dates | Commits |
 |---|---|---|---|
@@ -13,7 +13,8 @@ working day. Step IDs (`P1.S1.2` etc.) and exam-topic mappings follow
 | Phase 0 — Readiness check | ✅ Done | 2026-09-14 | `a30018a`, tag `v0-local-baseline` |
 | Phase 1 — AWS account foundation | ✅ Done (2 items deferred ~24h) | 2026-09-14 → 15 | `ea7ab1b`, `389d384` |
 | Phase 2 — Files to Amazon S3 | ✅ Done | 2026-09-26 → 30 | `889ec98` … (day 4) |
-| Phase 3 — Metadata to Amazon RDS PostgreSQL | ⏳ Next | from 2026-10-01 | — |
+| Phase 3 — Metadata to Amazon RDS PostgreSQL | ⏳ Next | not started | — |
+| Side feature — Claude document analysis (ADR 16) | ✅ Done | 2026-11-24 | (this day's commit) |
 
 ---
 
@@ -447,3 +448,34 @@ Exam topic: D2 Task 2.1 · `EX-2.1-K05/K11` event-driven, queuing · `EX-1.1-S05
 | `docs/cleanup.md` rows added | 6 Phase 2 rows |
 
 **Carried forward:** reap unconfirmed uploads and replace the confirm endpoint with events (Phase 9); verify `HeadObject` needs no `kms:Decrypt` (Phase 5); attach `DocumentApiS3Access` to the instance role (Phase 4). **Next: Phase 3 — metadata to Amazon RDS for PostgreSQL.**
+
+---
+
+## Side feature — Claude document analysis (2026-11-24)
+
+**What it is.** Not an AWS phase: an LLM integration on top of the same API. `POST /documents/{id}/analysis`
+sends a stored PDF or text file to Claude's Messages API with a strict JSON-schema tool and returns
+structured findings, each quoting its evidence and page. Plan: `C:\Jobs 2026\Deloitte\AI_LLM_Integration\Claude_Messages_API_integration.md`.
+
+```
+POST /documents/{id}/analysis ─▶ ownership 404 · state 409 · type 415 ─▶ bytes from DocumentStorage
+     ─▶ Claude: system prompt + document block + tool record_document_analysis (strict)
+     ◀─ tool_use input {documentType, summary, findings[{category, description, evidence, page}]}
+     ─▶ validated ─▶ 200 JSON + token usage      (refusal / cut off / no tool / wrong shape ─▶ 502; rate limit, 5xx ─▶ 503)
+```
+
+**Setup** — *Sandeep*: Claude Console (existing $100 credit; monthly spend limit set; auto-reload off); API key `document-api-laptop` created, saved in Google Password Manager, stored as user env var `ANTHROPIC_API_KEY` via `Read-Host -AsSecureString` (so it never entered shell history); verified by length and prefix only. Made the synthetic 2-page lab report (fictional data, labelled as such on every page).
+
+**Build** — *Claude*
+- Anthropic Java SDK **3.13.0**; every class and method name checked against the jar (`javap`) — 3.x differs from older docs (`addUserMessageOfContentBlockParams`; the SDK's 5xx exceptions all extend `InternalServerException`).
+- `analysis` package: `DocumentAnalyzer` interface; `ClaudeDocumentAnalyzer` (request building, reply validation, error mapping); `DisabledDocumentAnalyzer` (503); `AnalysisConfig` (client only when enabled); `AnalysisProperties`; three exceptions. `DocumentService.analyze` (not transactional), controller endpoint, `ApiExceptionHandler` 415/502/503, `application.properties` (off by default), `http/documents.http` section A.
+- Tests: `ClaudeDocumentAnalyzerTest` (10, offline: the request JSON; good reply; refusal; `max_tokens`; no tool call; wrong shape; blank evidence; rate limit → 503; bad key → 502), `AnalysisConfigTest` (2: off by default, no client bean), `DocumentServiceTest` (+4), end-to-end (+1 over real HTTP with a mock analyzer: 200, 404, 502, 503, 415), `ClaudeDocumentAnalyzerIntegrationTest` (2, opt-in `DOCAPI_CLAUDE_IT=true`).
+- `./mvnw verify`: **57 tests, 54 run green, 3 skipped** (2 real-Claude, 1 real-S3 — opt-in).
+
+**Real call** — *Claude*, `DOCAPI_CLAUDE_IT=true`: lab report PDF → 8 findings in 14 s, both out-of-range values (glucose 112, LDL 142) quoted with page numbers; 4,885 input / 1,084 output tokens ≈ **4¢**. Plain text → 4 findings, 933 / 443 tokens ≈ 1¢.
+
+**Manual check** — *Sandeep*: IntelliJ run configuration with `DOCAPI_ANALYSIS_ENABLED=true`, `http/documents.http` section A against the local API: **A4 → `200`** with findings, evidence, pages and token usage; **A5 (another user) → `404`**.
+
+**Decisions** (ADR 16): tool + `strict` rather than free text; no forced `tool_choice` (current models reject it); every reply validated; 502 vs 503 by whose fault; interface for a later swap to Claude on Bedrock (instance role, VPC endpoint — no NAT in Phase 7's design); refusal fallback deferred (beta-only in the SDK); results not stored yet.
+
+**Next options:** store results (Flyway V3 + audit trail), run it on the Phase 9 queue, Claude on Bedrock, retrieval across documents (still to do — on the resume as "retrieval"), MCP server.

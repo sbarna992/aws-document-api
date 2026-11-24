@@ -113,6 +113,15 @@ public class DocumentController {
         return DocumentResponse.from(service.requestProcessing(ownerId, id));
     }
 
+    /**
+     * Sends the document to Claude and returns structured findings, each quoting its evidence (ADR 16).
+     * POST, not GET: every call does new, billed work and the answer can differ slightly between calls.
+     */
+    @PostMapping("/{id}/analysis")
+    public DocumentAnalysisResponse analyze(@RequestHeader(OWNER_HEADER) String ownerId, @PathVariable UUID id) {
+        return DocumentAnalysisResponse.from(id, service.analyze(ownerId, id));
+    }
+
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@RequestHeader(OWNER_HEADER) String ownerId, @PathVariable UUID id) {

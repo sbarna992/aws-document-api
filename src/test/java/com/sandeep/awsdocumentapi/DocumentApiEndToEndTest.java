@@ -1,6 +1,13 @@
 package com.sandeep.awsdocumentapi;
 
+import com.sandeep.awsdocumentapi.analysis.AnalysisFailedException;
+import com.sandeep.awsdocumentapi.analysis.AnalysisUnavailableException;
+import com.sandeep.awsdocumentapi.analysis.DocumentAnalysis;
+import com.sandeep.awsdocumentapi.analysis.DocumentAnalysis.Finding;
+import com.sandeep.awsdocumentapi.analysis.DocumentAnalysis.TokenUsage;
+import com.sandeep.awsdocumentapi.analysis.DocumentAnalyzer;
 import com.sandeep.awsdocumentapi.document.CreateDocumentRequest;
+import com.sandeep.awsdocumentapi.document.DocumentAnalysisResponse;
 import com.sandeep.awsdocumentapi.document.DocumentCreatedResponse;
 import com.sandeep.awsdocumentapi.document.DocumentDetailResponse;
 import com.sandeep.awsdocumentapi.document.DocumentRepository;
@@ -18,6 +25,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
 import java.nio.charset.StandardCharsets;
@@ -31,6 +39,10 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willThrow;
 
 /**
  * The whole lifecycle over real HTTP, against the local PostgreSQL and a throw-away storage directory.
@@ -55,6 +67,9 @@ class DocumentApiEndToEndTest {
 
     @Autowired
     private DocumentRepository repository;
+
+    @MockitoBean
+    private DocumentAnalyzer analyzer;
 
     /** Unique per test run so leftovers from a failed run can never affect the next one. */
     private final String owner = "e2e-" + UUID.randomUUID();
@@ -154,6 +169,68 @@ class DocumentApiEndToEndTest {
         client.get().uri("/documents/{id}", id).header(OWNER_HEADER, owner)
                 .exchange().expectStatus().isNotFound();
         assertThat(storageRoot).isEmptyDirectory();
+    }
+
+    /** The analysis endpoint over real HTTP. The analyzer is a mock: no key, no network, no cost. */
+    @Test
+    void analysisReturnsFindingsAndMapsEveryFailureToAProblem() {
+        UUID id = createAndUpload("notes.txt", "text/plain", "Renew the contract by 2026-12-31.");
+        given(analyzer.analyze(eq("notes.txt"), any(), any())).willReturn(new DocumentAnalysis("claude-opus-5-5",
+                "meeting notes", "A reminder to renew a contract.",
+                List.of(new Finding("deadline", "Contract renewal due", "Renew the contract by 2026-12-31.", null)),
+                new TokenUsage(120, 45)));
+
+        // 1. Success: structured findings, each quoting its evidence, plus the token counts
+        client.post().uri("/documents/{id}/analysis", id).header(OWNER_HEADER, owner)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(DocumentAnalysisResponse.class)
+                .value(response -> {
+                    assertThat(response.documentId()).isEqualTo(id);
+                    assertThat(response.model()).isEqualTo("claude-opus-5-5");
+                    assertThat(response.findings()).singleElement()
+                            .satisfies(finding -> assertThat(finding.evidence()).contains("2026-12-31"));
+                    assertThat(response.usage().inputTokens()).isEqualTo(120);
+                });
+
+        // 2. Someone else's document: 404, and nothing is sent anywhere
+        client.post().uri("/documents/{id}/analysis", id).header(OWNER_HEADER, "someone-else")
+                .exchange().expectStatus().isNotFound();
+
+        // 3. Claude unusable or unavailable: 502 / 503 problem details, never a stack trace
+        willThrow(new AnalysisFailedException("The analysis was cut off before it finished"))
+                .given(analyzer).analyze(any(), any(), any());
+        client.post().uri("/documents/{id}/analysis", id).header(OWNER_HEADER, owner)
+                .exchange()
+                .expectStatus().isEqualTo(HttpStatus.BAD_GATEWAY)
+                .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON);
+        willThrow(new AnalysisUnavailableException("Document analysis is not enabled on this server"))
+                .given(analyzer).analyze(any(), any(), any());
+        client.post().uri("/documents/{id}/analysis", id).header(OWNER_HEADER, owner)
+                .exchange().expectStatus().isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+
+        // 4. A Word document: 415 before the analyzer is ever called
+        UUID wordId = createAndUpload("notes.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "not really a docx");
+        client.post().uri("/documents/{id}/analysis", wordId).header(OWNER_HEADER, owner)
+                .exchange().expectStatus().isEqualTo(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    private UUID createAndUpload(String filename, String contentType, String content) {
+        DocumentCreatedResponse created = client.post().uri("/documents")
+                .header(OWNER_HEADER, owner)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(new CreateDocumentRequest(filename, contentType))
+                .exchange()
+                .expectStatus().isCreated()
+                .expectBody(DocumentCreatedResponse.class)
+                .returnResult().getResponseBody();
+        client.put().uri(created.uploadUrl())
+                .header(OWNER_HEADER, owner)
+                .body(content.getBytes(StandardCharsets.UTF_8))
+                .exchange()
+                .expectStatus().isOk();
+        return created.document().id();
     }
 
     private DocumentDetailResponse getDocument(UUID id) {

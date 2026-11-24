@@ -36,13 +36,16 @@ real authentication; documents are always scoped to that owner.
 | `GET` | `/documents` | The caller's documents, newest first | `200` |
 | `POST` | `/documents/{id}/uploaded` | **Temporary (removed in Phase 9):** confirm an upload. The API checks storage for the bytes and their size — `409` if none, `FAILED` if over the 10 MB limit, else `UPLOADED` with a download URL | `200` |
 | `POST` | `/documents/{id}/process` | Start asynchronous processing (SHA-256 today) | `202` |
+| `POST` | `/documents/{id}/analysis` | **Analyse with Claude** (PDF or plain text): document type, summary, and findings that each quote their evidence and page. Off by default (`503`); see *Document analysis with Claude* | `200` |
 | `DELETE` | `/documents/{id}` | Delete metadata and bytes | `204` |
 | `GET` | `/actuator/health` | Liveness, including the database | `200` |
 
 Document lifecycle: `PENDING_UPLOAD → UPLOADED → PROCESSING → PROCESSED | FAILED`.
 
 Errors are RFC 9457 problem details (`application/problem+json`): `400` for invalid input, `404` for
-unknown *or someone else's* document, `409` for an operation the current status does not allow.
+unknown *or someone else's* document, `409` for an operation the current status does not allow; for
+analysis also `415` (not PDF or plain text), `502` (Claude refused or gave an unusable answer) and
+`503` (analysis switched off, or Claude temporarily unavailable).
 
 ## Running locally
 
@@ -79,9 +82,29 @@ run the requests top to bottom; they chain the document id and URLs automaticall
 Tests run against the real local PostgreSQL (no Docker on the development machine). Repository tests
 roll back; the end-to-end test uses a unique owner and a temporary storage directory and cleans up.
 
+## Document analysis with Claude
+
+`POST /documents/{id}/analysis` sends a stored PDF or plain-text document to Claude's Messages API
+(Anthropic Java SDK) together with one tool, `record_document_analysis`, whose strict JSON schema is the
+answer we want. Claude "calls" the tool, so the reply is structured JSON — `documentType`, `summary` and
+`findings`, each with a `category`, a `description`, the exact `evidence` quoted from the document and
+its `page` — which the API validates before returning it with the token counts. Nothing is stored. Design
+and trade-offs: ADR 16.
+
+| Item | Value |
+|---|---|
+| Switch | `DOCAPI_ANALYSIS_ENABLED=true` (default `false`: no key needed, endpoint answers `503`) |
+| Key | `ANTHROPIC_API_KEY` environment variable only — read by the SDK, never in a file or log. Set a monthly spend limit in the Claude Console. |
+| Settings | `DOCAPI_ANALYSIS_MODEL` (`claude-opus-5-5`), `DOCAPI_ANALYSIS_EFFORT` (`medium`), `DOCAPI_ANALYSIS_MAX_TOKENS` (`16000`), `DOCAPI_ANALYSIS_TIMEOUT` (`PT2M`) |
+| Cost | About 4¢ for a 2-page PDF, under 1¢ for a short text file (Opus 5.5: $4 / $20 per million input / output tokens) |
+| Data | Contents are sent to Anthropic: use synthetic documents only. The test fixture is a fictional lab report. |
+| Try it | `http/documents.http`, section A, with analysis enabled in the run configuration |
+| Real-Claude test | `DOCAPI_CLAUDE_IT=true ./mvnw verify` (needs the key; a few cents). The default build never calls Claude. |
+
 ## Project layout
 
 ```
+analysis/     DocumentAnalyzer abstraction + ClaudeDocumentAnalyzer (Messages API, strict tool)
 document/     entity, repository, service, controller, DTOs, domain exceptions
 storage/      DocumentStorage abstraction + LocalFileSystemStorage (S3DocumentStorage later)
 processing/   asynchronous worker triggered after commit (SQS + Lambda later)

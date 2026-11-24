@@ -148,6 +148,62 @@ X-User-Id: {{user}}
     });
 %}
 
+### ===== A. Document analysis with Claude (ADR 16) =====
+# Needs DOCAPI_ANALYSIS_ENABLED=true in the run configuration and ANTHROPIC_API_KEY in the environment
+# (restart IntelliJ after setting it). Each A4 call costs about 4 cents. Without the switch, A4 answers 503.
+
+### A1. Create a PDF document
+POST {{host}}/documents
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+  "filename": "test-lab-report.pdf",
+  "contentType": "application/pdf"
+}
+
+> {%
+    client.global.set("pdfId", response.body.document.id);
+    client.global.set("pdfUploadUrl", response.body.uploadUrl);
+%}
+
+### A2. Upload the synthetic lab report (fictional data)
+PUT {{pdfUploadUrl}}
+Content-Type: application/pdf
+X-User-Id: {{user}}
+
+< ../src/test/resources/analysis/test-lab-report.pdf
+
+### A3. Confirm the upload
+POST {{host}}/documents/{{pdfId}}/uploaded
+X-User-Id: {{user}}
+
+### A4. Analyse -> 200 with documentType, summary, findings (evidence + page) and token usage
+POST {{host}}/documents/{{pdfId}}/analysis
+X-User-Id: {{user}}
+
+> {%
+    client.test("analysed", function () {
+        client.assert(response.status === 200, "expected 200, got " + response.status);
+        client.assert(response.body.findings.length > 0, "expected findings");
+        client.assert(response.body.findings.every(f => f.evidence.length > 0), "every finding quotes evidence");
+    });
+%}
+
+### A5. Someone else's document -> 404 (nothing is sent to Claude)
+POST {{host}}/documents/{{pdfId}}/analysis
+X-User-Id: someone-else
+
+> {%
+    client.test("hidden from others", function () {
+        client.assert(response.status === 404, "expected 404, got " + response.status);
+    });
+%}
+
+### A6. Clean up
+DELETE {{host}}/documents/{{pdfId}}
+X-User-Id: {{user}}
+
 ### Validation failure example (400)
 POST {{host}}/documents
 Content-Type: application/json

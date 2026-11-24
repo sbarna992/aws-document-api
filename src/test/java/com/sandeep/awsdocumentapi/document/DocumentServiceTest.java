@@ -1,5 +1,8 @@
 package com.sandeep.awsdocumentapi.document;
 
+import com.sandeep.awsdocumentapi.analysis.DocumentAnalysis;
+import com.sandeep.awsdocumentapi.analysis.DocumentAnalyzer;
+import com.sandeep.awsdocumentapi.analysis.UnsupportedDocumentTypeException;
 import com.sandeep.awsdocumentapi.processing.DocumentProcessingRequested;
 import com.sandeep.awsdocumentapi.storage.DocumentStorage;
 import org.junit.jupiter.api.BeforeEach;
@@ -8,14 +11,20 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.MediaType;
 import org.springframework.util.unit.DataSize;
 
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.AdditionalMatchers.aryEq;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -31,6 +40,8 @@ class DocumentServiceTest {
     private DocumentStorage storage;
     @Mock
     private ApplicationEventPublisher events;
+    @Mock
+    private DocumentAnalyzer analyzer;
     private DocumentService service;
 
     /** Tiny limit so the size tests need no big fixtures. */
@@ -38,7 +49,7 @@ class DocumentServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new DocumentService(repository, storage, events, new DocumentLimits(DataSize.ofBytes(MAX)));
+        service = new DocumentService(repository, storage, events, new DocumentLimits(DataSize.ofBytes(MAX)), analyzer);
     }
 
     @Test
@@ -125,6 +136,54 @@ class DocumentServiceTest {
         assertThatThrownBy(() -> service.confirmUpload(OWNER, document.getId()))
                 .isInstanceOf(InvalidDocumentStateException.class);
         verify(storage, never()).sizeOf(any());
+    }
+
+    // --- analyze (ADR 16): ownership, state and type are checked before any byte leaves the API ---
+
+    @Test
+    void analyzeSendsTheStoredBytesToTheAnalyzer() {
+        Document document = uploadedDocument();
+        byte[] bytes = "%PDF-1.7".getBytes(StandardCharsets.US_ASCII);
+        DocumentAnalysis expected = new DocumentAnalysis("claude-opus-5-5", "proposal", "A proposal.", List.of(),
+                new DocumentAnalysis.TokenUsage(10, 5));
+        given(repository.findByIdAndOwnerId(document.getId(), OWNER)).willReturn(Optional.of(document));
+        given(storage.load(document.getStorageKey())).willReturn(new ByteArrayResource(bytes));
+        given(analyzer.analyze(eq("proposal.pdf"), eq(MediaType.APPLICATION_PDF), aryEq(bytes))).willReturn(expected);
+
+        assertThat(service.analyze(OWNER, document.getId())).isSameAs(expected);
+    }
+
+    @Test
+    void analyzeRefusesSomeoneElsesDocument() {
+        UUID id = UUID.randomUUID();
+        given(repository.findByIdAndOwnerId(id, OWNER)).willReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.analyze(OWNER, id)).isInstanceOf(DocumentNotFoundException.class);
+        verify(analyzer, never()).analyze(any(), any(), any());
+    }
+
+    @Test
+    void analyzeRefusesADocumentWithoutContent() {
+        Document document = newDocument(); // still PENDING_UPLOAD
+        given(repository.findByIdAndOwnerId(document.getId(), OWNER)).willReturn(Optional.of(document));
+
+        assertThatThrownBy(() -> service.analyze(OWNER, document.getId()))
+                .isInstanceOf(InvalidDocumentStateException.class);
+        verify(storage, never()).load(any());
+        verify(analyzer, never()).analyze(any(), any(), any());
+    }
+
+    @Test
+    void analyzeRefusesUnsupportedTypesWithoutReadingTheBytes() {
+        UUID id = UUID.randomUUID();
+        Document document = new Document(id, OWNER, "proposal.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document", id + "-proposal.docx");
+        document.markUploaded(1234);
+        given(repository.findByIdAndOwnerId(id, OWNER)).willReturn(Optional.of(document));
+
+        assertThatThrownBy(() -> service.analyze(OWNER, id)).isInstanceOf(UnsupportedDocumentTypeException.class);
+        verify(storage, never()).load(any());
+        verify(analyzer, never()).analyze(any(), any(), any());
     }
 
     private static Document newDocument() {
