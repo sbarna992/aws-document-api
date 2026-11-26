@@ -14,7 +14,7 @@ working day. Step IDs (`P1.S1.2` etc.) and exam-topic mappings follow
 | Phase 1 — AWS account foundation | ✅ Done (2 items deferred ~24h) | 2026-09-14 → 15 | `ea7ab1b`, `389d384` |
 | Phase 2 — Files to Amazon S3 | ✅ Done | 2026-09-26 → 30 | `889ec98` … (day 4) |
 | Phase 3 — Metadata to Amazon RDS PostgreSQL | ⏳ Next | not started | — |
-| Side feature — Claude document analysis (ADR 16) | ✅ Done | 2026-11-24 | (this day's commit) |
+| Side feature — Claude document analysis (ADR 16) | ✅ Done | 2026-11-24 | `f82ac89`, `4ab12b6` |
 
 ---
 
